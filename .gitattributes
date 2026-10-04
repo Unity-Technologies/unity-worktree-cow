@@ -1,0 +1,7 @@
+# The bash port must never reach a Unix box with CRLF - bash fails on the
+# shebang itself ("bad interpreter: /usr/bin/env bash^M"), whatever the
+# consumer's core.autocrlf happens to be set to.
+*.sh text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf

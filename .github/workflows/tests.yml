@@ -1,0 +1,36 @@
+name: tests
+
+# Synthetic fixtures only - no Unity, no real project - so this runs on stock
+# GitHub-hosted runners in seconds. ubuntu (ext4) and windows (NTFS) cannot
+# block-clone, so they exercise the REFUSAL paths; macOS (APFS) can, and is the
+# only place the clone paths run in CI. Harnesses that need Unity are
+# instruments, not gates, and are deliberately not here.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bash:
+    name: bash (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show environment
+        shell: bash
+        run: |
+          uname -a
+          bash --version | head -1
+          git --version
+      - name: Run the suite
+        shell: bash
+        run: bash tests/run-tests.sh
