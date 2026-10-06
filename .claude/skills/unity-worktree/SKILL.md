@@ -15,19 +15,35 @@ reference. Only the disk blocks are shared, and they diverge on write. That is
 the only model that preserves Unity's assumption of exclusive ownership while
 making extra worktrees cheap.
 
-Measured per worktree on four projects (Windows 11, ReFS, Unity 6000.7):
+Measured per worktree on Windows 11, ReFS:
 
-| project | plain checkout + its own Library | `uwt new` | after first open + 100 edits |
+| project | plain checkout + its own Library | `uwt new` | after first open + work |
 |---|---|---|---|
 | asset-heavy, 41k files | 33.6 GiB · 135 s + 617 s import | 346 MiB · 24 s | 1.99 GiB · **17×** |
 | monorepo subdir, 39k files | 16.1 GiB · 73 s + 416 s | 278 MiB · 25 s | 967 MiB · **17×** |
 | URP sample, 3k files | 3.4 GiB · 6 s + 138 s | 118 MiB · 11 s | 421 MiB · **8×** |
 | DOTS, code only | 1.1 GiB · 0.4 s + 71 s | 97 MiB · 10 s | 412 MiB · **2.7×** |
+| production, 41.5k files, 25 GiB Library | ~31 GiB (estimated) | 405 MiB · 34–40 s | 2.50–2.64 GiB · **~12×** |
 
-A hydrated worktree opens with 0–4 assets imported, against 3,990–23,788 cold.
-The first open is where the private cost comes from, almost all of it Unity
-rebuilding `Bee` and `BurstCache` and re-materialising package binaries; after
-that, code, material, shader, prefab and scene edits grow a worktree slowly
+The first four are Unity 6000.7, "work" being 100 scripted edits, measured by
+per-file refcount. The fifth is Unity 6000.6 with four agent-driven editors
+compiling and running tests in parallel, measured by physical-cluster overlap.
+
+A hydrated worktree opens with 0–6 assets imported, against 3,990–23,788 cold.
+That is not a free open: the first one compiles every script assembly and
+resolves packages, because `Bee` and `ScriptAssemblies` are denied. On the
+production project it took 396–419 s with four editors opening at once:
+`CompileScripts` 205–212 s, `ImportOutOfDateAssets` 86–115 s (for ~5 actual
+imports), `InvokePackagesCallback` 34–39 s, `CategorizeAssets` ~29 s. Still
+much faster than a cold import, but budget minutes, not seconds.
+
+The first open is also where the private cost comes from. The largest item is
+usually `PackageCache`: Unity re-creates a fixed set of large package binaries
+(executables in `~` folders such as `com.unity.ai.assistant/RelayApp~/relay_win.exe`)
+byte-identical but in fresh blocks, 0.8–1.0 GiB on projects that carry them
+and nothing on projects that do not. Then `Bee` and `BurstCache` regenerating
+(~0.3 and 0.2–0.4 GiB). After that, code, material, shader, prefab and scene
+edits grow a worktree slowly
 (+17 to +77 MiB over a second open and 250 edits).
 
 `DataStore`, the bulk of a Unity 6.6+ Library, stays shared through all of
@@ -48,6 +64,11 @@ each round of edits that reimports textures, models or other large-artifact
 assets.
 
 ## Quick start
+
+Commit `.claude/skills/unity-worktree/` to the repo. `new` resets every
+worktree to its branch and cleans untracked files, so an uncommitted skill is
+not in the worktrees it creates, and agents working there cannot reach uwt
+(`new` warns, and its JSON carries the script's absolute path as `uwt`).
 
 In a checkout whose `Library/` is imported and whose editor is **closed**:
 
@@ -74,21 +95,24 @@ $uwt hydrate path/to/that/worktree
 | `new BRANCH [--path DIR] [--base REF] [--inherit-untracked] [--init-submodules] [--verify] [--json]` | `git worktree add --no-checkout`, clone the snapshot, hand git the snapshot's index, `reset --hard` to the branch, verify zero tracked differences, clean inherited untracked files, hydrate `Library/`. Refuses before registering anything if the volume cannot clone, or if it folds case and the branch has paths that collide by case. Rolls back on failure. |
 | `hydrate [PATH] [--force]` | Gives an existing worktree a `Library/` cloned from the golden. |
 | `list [PATH] [--json]` | Every worktree of the repo, including ones uwt did not create, with its branch, lock state, and whether its `Library/` came from uwt (`uwt`), from an editor (`other`), or is absent (`none`). |
+| `measure [PATH...] [--by N] [--json]` | Private disk of each worktree and the golden against all the others, by physical-block overlap, with the largest private groups. Read-only. See "Measuring it yourself". |
 | `remove PATH [--force] [--json]` | `git worktree remove` behind the editor interlock. A dirty worktree needs `--force`; a locked one needs `git worktree unlock` first; the branch is kept. Refuses the main worktree. |
 
 Run `new` from inside the repo. `--path` is relative to your directory; the
-default is `<repo>-<branch>` beside the repo. The golden lives at
+default is `<repo>-<branch>` beside the repo. Several `new` calls can run at
+once: the golden is only read, and each call writes only inside its own
+worktree. The golden lives at
 `<repo>/.git/uwt/golden`; set `UWT_CACHE_ROOT` when worktrees live on a
 different volume from the repo (the golden must be on the worktrees' volume).
 
 Exit codes: `0` ok · `2` failure · `3` refused by the editor interlock.
 
-For agents, `list`, `new` and `remove` take `--json`: the human output moves to
+For agents, `list`, `new`, `remove` and `measure` take `--json`: the human output moves to
 stderr and stdout carries exactly one record, either
 `{"status":"ok","command":"new","value":{...}}` or
 `{"status":"error","exit":2,"message":"..."}`. `new`'s value has `path`,
-`project`, `branch`, `head`, `seconds`, `verified` and
-`submodules_uninitialized`.
+`project`, `uwt` (this script's absolute path), `branch`, `head`, `seconds`,
+`verified` and `submodules_uninitialized`.
 
 A project in a subdirectory of its repo (a monorepo) works: `seed` records
 the offset and `new` clones the snapshot back to it. Tracked files outside the
@@ -103,7 +127,8 @@ A filesystem that block-clones, with golden and worktrees on **one volume**:
   Bash and clones with robocopy. NTFS cannot clone.
 - **macOS**: APFS. `new` re-reads every tracked byte once there, so on a
   large LFS project it takes about a minute (see Troubleshooting).
-- **Linux**: btrfs, XFS with `reflink=1`, ZFS ≥ 2.2. ext4 cannot.
+- **Linux**: btrfs, XFS with `reflink=1`, ZFS ≥ 2.2 (`measure` excepted). ext4
+  cannot.
 
 There is no copy fallback. On a volume that cannot clone, `doctor` says so and
 every command refuses, because a byte copy of the project is the problem this
@@ -142,7 +167,8 @@ golden.
 
 **Keep Windows worktree roots short** unless `LongPathsEnabled=1`:
 `Library/PackageCache` paths approach 260 characters on their own. `doctor`
-warns.
+warns, and so does `new` when the target root would push the snapshot's
+deepest file past the limit; the default `<repo>-<branch>` path often does.
 
 **Remove worktrees with `uwt remove PATH`**, which refuses while an editor
 has the worktree open. Plain `git worktree remove` works too, with the editor
@@ -160,6 +186,27 @@ Unity package vendored as a submodule is missing until then.
 default). Two paths that differ only by case, file or directory, would land
 on one name and the tree could never verify, so `new` names them and refuses
 before registering. `doctor` says which kind of volume you are on.
+
+## Parallel editors
+
+Each worktree is its own project to Unity, so one editor per worktree runs
+side by side. Two things are shared by default and must be overridden:
+
+- **The log.** Every GUI editor writes the same per-user `Editor.log`
+  (`%LOCALAPPDATA%\Unity\Editor\` on Windows), so parallel editors overwrite
+  each other's. Open each with `-logFile <worktree>/Logs/Editor.log`.
+- **Which editor a command reaches.** Anything that addresses a running editor
+  by project, such as the `unity` CLI, needs that worktree's path on every
+  call (`--project-path <worktree>`), or it can land on a sibling's editor.
+
+For an agent, per worktree:
+
+1. `new BRANCH --json`; keep `value.project` and `value.uwt`.
+2. Open the editor on `value.project` with its own `-logFile`, and wait for it
+   to finish the first open (a full script compile; see above).
+3. Work, targeting that project explicitly.
+4. Save and close the editor. uwt never closes it for you.
+5. `value.uwt remove value.path`. `remove` refuses while the editor is up.
 
 ## What is cloned, and what is not
 
@@ -236,19 +283,41 @@ worktree to within one file on all four projects above, and files under 4 KiB
 are 68–74% of the cost on every one of them. Content type decides how much
 there is to save, not what a worktree costs.
 
+Two corrections when predicting from a histogram: identical trees can store a
+different number of files inline (a golden 50,370, a fresh worktree of it
+57,111), and every inline file is a private cluster, so allow a few percent.
+
 ## Measuring it yourself
 
-Free-space deltas and `du` are **not** valid measurements on ReFS, btrfs or
-APFS: free space updates lazily, and `du` counts shared blocks once per file.
-Measure sharing directly:
+```bash
+$uwt measure                 # every worktree of the repo, and the golden
+$uwt measure path/to/wt      # just that one, still against all the others
+$uwt measure --by 3 --json   # group private bytes deeper; one JSON record
+```
 
-- **Windows/ReFS**: `fsutil file queryExtentsAndRefCounts <file>`; an extent
-  with `Ref` above 1 is shared. Sum private clusters over a tree for the
-  worktree's true cost.
-- **Linux/btrfs**: `sync`, then `btrfs filesystem du -s <dir>`. Before a
-  `sync` its numbers are wrong.
-- **Linux/XFS, macOS**: compare physical offsets (`filefrag -v`;
-  `F_LOG2PHYS_EXT` on macOS).
+A block is private to a worktree when no other tree (the main checkout and its
+`.git`, the golden, sibling worktrees) maps the same physical block. `measure`
+reads physical extents directly: `FSCTL_GET_RETRIEVAL_POINTERS` on Windows
+(through PowerShell and inline C#), FIEMAP on Linux and `F_LOG2PHYS_EXT` on
+macOS (through `python3`). Files stored inline count as one private cluster
+each. On ReFS it takes 30 s for a 41.5k-file project with four worktrees and
+the golden, ~50k files each, and gives the same answer every run. ZFS clones
+blocks but does not report physical extents, so `measure` refuses there
+(exit 2).
+
+What not to use:
+
+- **Free space and `du`.** Free space updates lazily on ReFS and APFS, and
+  `du` counts shared blocks in full for every file.
+- **Summed ReFS refcounts** (`fsutil file queryExtentsAndRefCounts`, Ref == 1
+  as private). On one file it is stable, which is why `doctor` can use it.
+  Over a tree, after heavy writes on the volume, it is not: an idle golden
+  read 197, 324, 782, 1,028, 1,534 and 1,642 MiB private in six back-to-back
+  runs, with 10–25k files flipping between Ref 1 and 2. Physical extents do
+  not move.
+- **`btrfs fi du` before a `sync`**: it undercounts until dirty pages are
+  allocated. `measure` flushes each file first on Linux; on macOS it reports
+  such data as unmapped, so `sync` first.
 
 To check a build for path leaks between worktrees, grep for path fragments,
 not the bare project name: Unity bakes `productName` into `app.info` and
@@ -274,6 +343,10 @@ not the bare project name: Unity bakes `productName` into `app.info` and
   editor for a few seconds; on Windows check `tasklist | findstr DataStore`.
   If it is genuinely orphaned (no editor anywhere), ending it is safe: its
   state lives in `Library/DataStore/`.
+- `doctor` says no live editor while a `unity.exe` process is running: that is
+  likely the `unity` CLI (`%LOCALAPPDATA%\Unity\bin\unity.exe`), not an
+  editor. The interlock deliberately does not match process names; it checks
+  the pid in `EditorInstance.json` and whether the databases are open.
 - `doctor` says cloning does not work on a ReFS volume: Windows older than 11
   24H2, or the cache root is on another volume (set `UWT_CACHE_ROOT`).
   Also check the volume is actually ReFS (`df -T` under Git Bash, or

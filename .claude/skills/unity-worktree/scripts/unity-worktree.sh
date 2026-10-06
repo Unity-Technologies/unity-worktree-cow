@@ -140,6 +140,13 @@ fs_type() {
 }
 same_volume() { [ "$(df -P "$1" | awk 'NR==2{print $1}')" = "$(df -P "$2" | awk 'NR==2{print $1}')" ]; }
 file_count()  { find "$1" -type f 2>/dev/null | wc -l | tr -d ' '; }
+# Length of the longest file path under <dir>, relative to it. Recorded at seed
+# so `new` can tell, before it writes anything, whether a root breaks MAX_PATH.
+longest_path() { (cd "$1" && find . -type f 2>/dev/null) | awk '{ l = length($0) - 2; if (l > m) m = l } END { print m + 0 }'; }
+# Windows only: exit 0 iff LongPathsEnabled=1.
+long_paths_on() {
+  [ "$(MSYS_NO_PATHCONV=1 reg query 'HKLM\SYSTEM\CurrentControlSet\Control\FileSystem' /v LongPathsEnabled 2>/dev/null | grep -oE '0x[0-9]+$')" = 0x1 ]
+}
 
 # Does <dir>'s volume fold case? Asked of the volume, not the OS: APFS and
 # NTFS/ReFS usually do, but both can be formatted or flagged case-sensitive.
@@ -327,8 +334,7 @@ cmd_doctor() {
   if case_insensitive "$cr"; then good "case-insensitive volume: new refuses a branch whose paths collide by case"
   else good "case-sensitive volume"; fi
   if [ "$OS" = windows ]; then
-    local lp; lp="$(MSYS_NO_PATHCONV=1 reg query 'HKLM\SYSTEM\CurrentControlSet\Control\FileSystem' /v LongPathsEnabled 2>/dev/null | grep -oE '0x[0-9]+$')"
-    if [ "$lp" = 0x1 ]; then good "long paths enabled"
+    if long_paths_on; then good "long paths enabled"
     else warn "LongPathsEnabled is not 1: Library/PackageCache paths approach 260 chars, so keep worktree roots short (E:\\wt\\name)"; fi
   fi
   say ""; head_ "editor"
@@ -396,6 +402,7 @@ cmd_seed() {
     echo "prefix=$(project_prefix "$proj")"
     echo "created=$(stamp)"
     echo "files=$(file_count "$stage")"
+    echo "longest_path=$(longest_path "$stage")"
   } > "$stage.txt"
   rm -rf "$gd" "$gd.txt" "$gd.index" || { rm -rf "$stage" "$stage.txt" "$stage.index"; die "could not remove the previous golden $gd"; }
   mv "$stage" "$gd" && mv "$stage.index" "$gd.index" && mv "$stage.txt" "$gd.txt" \
@@ -446,6 +453,16 @@ cmd_new() {
   say ""; head_ "uwt new"; say "repo     $m"; say "branch   $branch"; say "path     $path"
   golden_ok "$gd" || die "no golden yet - run 'uwt seed' first (editor closed)"
   [ -e "$path" ] && die "path already exists: $path"
+
+  # MAX_PATH: the golden knows its longest relative path, so this is exact for
+  # the snapshot. Warn rather than refuse: robocopy copes, git and Unity may not.
+  local lp; lp="$(golden_field "$gd" longest_path)"
+  if [ "$OS" = windows ] && [ -n "$lp" ] && ! long_paths_on; then
+    local pdir0; pdir0="$(wpath "$path")"; local pre0; pre0="$(golden_field "$gd" prefix)"
+    [ -n "$pre0" ] && pdir0="$pdir0/$pre0"
+    local need=$(( ${#pdir0} + 1 + lp ))
+    [ "$need" -lt 260 ] || warn "LongPathsEnabled is off and the deepest file here would be $need characters (limit 259); choose a short --path such as E:\wt\name, or enable long paths"
+  fi
 
   # Everything that can refuse does so BEFORE git registers anything.
   same_volume "$gd" "$(dirname "$path")" || die "the golden ($gd) and the new worktree must be on one volume; set UWT_CACHE_ROOT or choose another --path"
@@ -561,9 +578,16 @@ cmd_new() {
 
   hydrate_library "$gd" "$pdir" || rollback "Library clone failed"
   local secs=$(( $(now) - t0 )) reg; reg="$(git -C "$path" rev-parse --path-format=absolute --show-toplevel)"
+  # Agents inside the worktree need a way back to uwt, if only to remove
+  # themselves. A skill this repo has not committed was cleaned out above.
+  local self sd; self="$(abs_path "${BASH_SOURCE[0]}")"; sd="$(dirname "$self")"
   say ""; good "worktree ready in ${secs}s: $path"
-  say "  remove it later with: uwt remove $(wpath "$path")"
-  json_ok new "{\"path\":$(json_str "$reg"),\"project\":$(json_str "$reg${pre:+/$pre}"),\"branch\":$(json_str "$branch"),\"head\":$(json_str "$(git -C "$path" rev-parse HEAD)"),\"seconds\":$secs,\"verified\":$([ "${OPT_VERIFY:-0}" = 1 ] && echo true || echo false),\"submodules_uninitialized\":$subs}"
+  say "  remove it later with: $(wpath "$self") remove $(wpath "$path")"
+  if [ "$(common_dir "$sd")" = "$(common_dir "$m")" ] && ! git -C "$sd" ls-files --error-unmatch "$(basename "$self")" >/dev/null 2>&1; then
+    warn "the uwt skill is not committed, so the new worktree has no copy of it; commit .claude/skills/unity-worktree/"
+  fi
+  [ "$OS" = windows ] && self="$(cygpath -m "$self")"
+  json_ok new "{\"path\":$(json_str "$reg"),\"uwt\":$(json_str "$self"),\"project\":$(json_str "$reg${pre:+/$pre}"),\"branch\":$(json_str "$branch"),\"head\":$(json_str "$(git -C "$path" rev-parse HEAD)"),\"seconds\":$secs,\"verified\":$([ "${OPT_VERIFY:-0}" = 1 ] && echo true || echo false),\"submodules_uninitialized\":$subs}"
   exit $EXIT_OK
 }
 
@@ -631,6 +655,59 @@ cmd_remove() {
   exit $EXIT_OK
 }
 
+# ------------------------------------------------------------------ measure
+# Private disk per worktree, against every other worktree of the repo and the
+# golden. The measuring itself is a platform helper (C# through PowerShell on
+# Windows, Python elsewhere) because it needs physical extent ioctls; which
+# trees count, and the output, are decided here so every platform agrees.
+cmd_measure() {
+  local anchor; anchor="$(project_root "$PWD")" || exit $EXIT_FAIL
+  local m; m="$(main_worktree "$anchor")" || die "not a git repository"
+  local gd; gd="$(golden_dir "$anchor")"
+  local here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  # Every tree that may share blocks: each worktree, named by its directory
+  # (de-duplicated), and the golden.
+  local names=() dirs=() wt n i
+  while IFS= read -r wt; do
+    [ -d "$wt" ] || continue
+    n="$(printf '%s' "${wt##*/}" | tr -c 'A-Za-z0-9._-' '-')"; i=2
+    while printf '%s\n' ${names[@]+"${names[@]}"} | grep -qxF -- "$n"; do n="${n%-[0-9]*}-$i"; i=$((i+1)); done
+    names+=("$n"); dirs+=("$(cd "$wt" && pwd -P)")
+  done < <(git -C "$m" worktree list --porcelain | sed -n 's/^worktree //p')
+  local gdp=""; golden_ok "$gd" && { gdp="$(cd "$gd" && pwd -P)"; names+=(golden); dirs+=("$gdp"); }
+  [ ${#dirs[@]} -ge 2 ] || die "nothing to compare: one worktree and no golden"
+
+  # Targets: the worktree containing each PATH, or the golden itself.
+  local targets="" p top k
+  for p in "$@"; do
+    top="$(cd "$p" 2>/dev/null && pwd -P)" || die "no such directory: $p"
+    if [ "$top" != "$gdp" ]; then
+      top="$(git -C "$top" rev-parse --path-format=absolute --show-toplevel 2>/dev/null)" || die "not a worktree, nor the golden: $p"
+      top="$(cd "$top" && pwd -P)"
+    fi
+    n=""; for k in "${!dirs[@]}"; do [ "${dirs[$k]}" = "$top" ] && n="${names[$k]}"; done
+    [ -n "$n" ] || die "not a worktree of this repo: $p"
+    targets="$targets;$n"
+  done
+  local args=(); for k in "${!dirs[@]}"; do args+=("${names[$k]}=$(wpath "${dirs[$k]}")"); done
+
+  local opts=() out rc
+  case "$OS" in
+    windows)
+      local ps; ps="$(command -v pwsh || command -v powershell)" || die "PowerShell not found"
+      [ -n "$targets" ] && opts+=(-Target "${targets#;}"); [ -n "${OPT_BY:-}" ] && opts+=(-By "$OPT_BY"); [ "$JSON" = 1 ] && opts+=(-Json)
+      out="$(MSYS2_ARG_CONV_EXCL='*' "$ps" -NoProfile -ExecutionPolicy Bypass -File "$(wpath "$here/measure.ps1")" ${opts[@]+"${opts[@]}"} "${args[@]}" 2>&1)"; rc=$? ;;
+    darwin|linux)
+      local py; py="$(command -v python3)" || die "python3 not found"
+      [ -n "$targets" ] && opts+=(--target "${targets#;}"); [ -n "${OPT_BY:-}" ] && opts+=(--by "$OPT_BY"); [ "$JSON" = 1 ] && opts+=(--json)
+      out="$("$py" "$here/measure.py" ${opts[@]+"${opts[@]}"} "${args[@]}" 2>&1)"; rc=$? ;;
+    *) die "unsupported OS: $(uname -s)" ;;
+  esac
+  [ $rc = 0 ] || die "measure failed: $(printf '%s' "$out" | tail -3)"
+  if [ "$JSON" = 1 ]; then json_ok measure "$out"; else say "$out"; fi
+  exit $EXIT_OK
+}
+
 # ------------------------------------------------------------------ cli
 usage() {
   cat <<EOF
@@ -644,6 +721,8 @@ uwt - cheap Unity git worktrees via copy-on-write
   uwt hydrate [PATH] [--force]            give an existing worktree a Library from the golden
   uwt list    [PATH] [--json]             the repo's worktrees and where each Library came from
   uwt remove  PATH [--force] [--json]     git worktree remove, behind the editor interlock
+  uwt measure [PATH...] [--by N] [--json] private disk of each worktree and the golden
+                                          (default: all), by physical-block overlap
 
 Golden location: <repo>/.git/uwt/golden, or \$UWT_CACHE_ROOT/golden.
 --json: human output goes to stderr; stdout carries one record,
@@ -652,7 +731,7 @@ Exit codes: 0 ok, 2 failure, 3 refused (an editor is using the project).
 EOF
 }
 
-OPT_FORCE=0; OPT_INHERIT_UNTRACKED=0; OPT_PATH=""; OPT_BASE=""; OPT_VERIFY=0; OPT_INIT_SUBMODULES=0; OPT_JSON=0
+OPT_FORCE=0; OPT_INHERIT_UNTRACKED=0; OPT_PATH=""; OPT_BASE=""; OPT_VERIFY=0; OPT_INIT_SUBMODULES=0; OPT_JSON=0; OPT_BY=""
 POS=()
 CMD="${1:-help}"; shift || true
 while [ $# -gt 0 ]; do
@@ -666,6 +745,8 @@ while [ $# -gt 0 ]; do
     --path=*)            OPT_PATH="${1#--path=}" ;;
     --base)              shift; OPT_BASE="${1:?--base needs a value}" ;;
     --base=*)            OPT_BASE="${1#--base=}" ;;
+    --by)                shift; OPT_BY="${1:?--by needs a value}" ;;
+    --by=*)              OPT_BY="${1#--by=}" ;;
     -h|--help)           usage; exit 0 ;;
     --*)                 die "unknown option: $1" ;;
     *)                   POS+=("$1") ;;
@@ -673,7 +754,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 if [ "$OPT_JSON" = 1 ]; then
-  case "$CMD" in list|new|remove) exec 3>&1 1>&2; JSON=1 ;; *) die "--json is supported by list, new and remove" ;; esac
+  case "$CMD" in list|new|remove|measure) exec 3>&1 1>&2; JSON=1 ;; *) die "--json is supported by list, new, remove and measure" ;; esac
 fi
 case "$CMD" in
   doctor)  cmd_doctor  "${POS[@]:-}" ;;
@@ -682,6 +763,7 @@ case "$CMD" in
   new)     cmd_new     "${POS[@]:-}" ;;
   list)    cmd_list    "${POS[@]:-}" ;;
   remove)  cmd_remove  "${POS[@]:-}" ;;
+  measure) cmd_measure ${POS[@]+"${POS[@]}"} ;;
   help|-h|--help) usage; exit 0 ;;
   *)       usage; die "unknown command: $CMD" ;;
 esac

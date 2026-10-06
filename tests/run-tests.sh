@@ -104,6 +104,7 @@ if [ $CLONES = 1 ]; then
   check "golden.txt, golden.index and golden/Library exist" exists "$GD.txt" "$GD.index" "$GD/Library"
   check "golden records the Unity version"               grep -q '^unity_version=6000.7.0b1' "$GD.txt"
   check "golden records HEAD"                            grep -q "^commit=$(git rev-parse HEAD)" "$GD.txt"
+  check "golden records its longest relative path"       grep -qE '^longest_path=[1-9][0-9]*$' "$GD.txt"
   check "tracked tree is in the golden"                  exists "$GD/Assets/Scenes/A.unity" "$GD/README.md"
   check "Temp, obj, .git are not"                        absent "$GD/Temp" "$GD/obj" "$GD/.git"
   check "generated .csproj is not"                       [ ! -e "$GD/Foo.csproj" ]
@@ -175,6 +176,27 @@ if [ $CLONES = 1 ]; then
         bash -c "cd '$PROJ/Assets' && bash '$UWT' new feature/r2 --path ../../wt-rel2 >/dev/null 2>&1 && [ -d '$ROOT/wt-rel2/Assets' ]"
   check "--base picks the start commit" \
         bash -c "cd '$PROJ' && bash '$UWT' new feature/b --path '$ROOT/wt-b' --base keep >/dev/null 2>&1 && [ \"\$(git -C '$ROOT/wt-b' rev-parse HEAD)\" = \"\$(git -C '$PROJ' rev-parse keep)\" ]"
+  cp "$UWT" "$PROJ/uwt-copy.sh"
+  check "new warns when the uwt it runs is not committed to this repo" \
+        bash -c "cd '$PROJ' && bash uwt-copy.sh new feature/nc --path '$ROOT/wt-nc' 2>&1 | grep -q 'skill is not committed'"
+  check "no such warning when it is committed"           bash -c "! grep -q 'not committed' <<<\"\$(bash '$UWT' new feature/c2 --path '$ROOT/wt-c2' 2>&1)\""
+  rm -f "$PROJ/uwt-copy.sh"
+  # Concurrent new: the golden is only read and every step writes inside its own
+  # worktree, so parallel calls must all succeed.
+  for i in 1 2 3 4; do (cd "$PROJ" && bash "$UWT" new "feature/par$i" --path "$ROOT/wt-par$i" >"$ROOT/par$i.log" 2>&1; echo $? >"$ROOT/par$i.rc") & done; wait
+  check "four concurrent news all exit 0"               bash -c "[ \"\$(cat '$ROOT'/par[1-4].rc | tr -d '\n')\" = 0000 ]"
+  check "and all four are clean, hydrated worktrees"    bash -c "for i in 1 2 3 4; do [ -s '$ROOT/wt-par'\$i/Library/ArtifactDB ] && [ -z \"\$(git -C '$ROOT/wt-par'\$i status --porcelain)\" ] || exit 1; done"
+  if [ $WIN = 1 ] && [ "$(MSYS_NO_PATHCONV=1 reg query 'HKLM\SYSTEM\CurrentControlSet\Control\FileSystem' /v LongPathsEnabled 2>/dev/null | grep -oE '0x[0-9]+$')" != 0x1 ]; then
+    # Just long enough that root + deepest golden file passes 259 characters.
+    lp="$(sed -n 's/^longest_path=//p' "$GD.txt")"; wr="$(cygpath -w "$ROOT")"
+    deep="$ROOT/$(printf 'd%.0s' $(seq 1 $(( 260 - ${#wr} - 2 - lp + 1 ))))"
+    check "new warns when the root would push the deepest file past MAX_PATH" \
+          bash -c "cd '$PROJ' && bash '$UWT' new feature/deep --path '$deep' 2>&1 | grep -q 'LongPathsEnabled is off'"
+    check "but not for a short root"                    bash -c "! grep -q 'LongPathsEnabled is off' <<<\"\$(bash '$UWT' new feature/short --path '$ROOT/wt-s' 2>&1)\""
+    git -C "$PROJ" worktree remove --force "$deep" >/dev/null 2>&1; rm -rf "$deep"
+  else
+    skip "MAX_PATH warning (Windows with LongPathsEnabled=0 only)"
+  fi
   # Cross-branch: the snapshot is at master; the target branch differs.
   git -C "$PROJ" checkout -q -b other && echo changed > README.md && echo new > Assets/N.txt && git rm -q Packages/manifest.json && git add -A && git commit -qm other && git checkout -q master
   check "cross-branch: reset reconciles to the target branch exactly" \
@@ -270,6 +292,7 @@ if [ $CLONES = 1 ]; then
   out="$(uwt new feature/j --path "$ROOT/wt-j" --json 2>/dev/null)"; rc=$?
   check "new --json exits 0 with one ok record on stdout" json_is 'd["status"]=="ok" and d["value"]["branch"]=="feature/j"' <<<"$out"
   check "new --json reports a path that exists"  json_is '__import__("os").path.isdir(d["value"]["path"])' <<<"$out"
+  check "new --json names the uwt script, and it exists" json_is '__import__("os").path.isfile(d["value"]["uwt"])' <<<"$out"
   out="$(uwt new feature/j2 --path "$ROOT/wt-j" --json 2>/dev/null)"; rc=$?
   check "new --json failure exits 2"             [ $rc = 2 ]
   check "new --json failure record names the problem" json_is 'd["status"]=="error" and d["exit"]==2 and "exists" in d["message"]' <<<"$out"
@@ -284,11 +307,12 @@ if [ $CLONES = 1 ]; then
         bash -c "bash '$UWT' remove '$ROOT/wt-keep' >/dev/null 2>&1 && [ ! -e '$ROOT/wt-keep' ]"
   if [ "$WIN" = 0 ]; then
     # Through a symlinked parent, as macOS's temp dir is (/var -> /private/var):
-    # git reports the resolved path, the caller passes the logical one.
-    ln -sfn "$ROOT" "$ROOT.link"
+    # git reports the resolved path, the caller passes the logical one. The
+    # link lives inside ROOT: ROOT may be a mount point in a root-owned /mnt.
+    ln -sfn "$ROOT" "$ROOT/link"
     check "remove works through a symlinked path" \
-          bash -c "bash '$UWT' remove '$ROOT.link/wt-rel2' >/dev/null 2>&1 && [ ! -e '$ROOT/wt-rel2' ]"
-    rm -f "$ROOT.link"
+          bash -c "bash '$UWT' remove '$ROOT/link/wt-rel2' >/dev/null 2>&1 && [ ! -e '$ROOT/wt-rel2' ]"
+    rm -f "$ROOT/link"
     ( sleep 8 9<>"$ROOT/wt-b/Library/ArtifactDB" ) & holder=$!
     sleep 1
     uwt remove "$ROOT/wt-b" --force >/dev/null 2>&1; rc=$?
@@ -400,6 +424,34 @@ else
         bash -c "echo x >> '$ROOT/wt-sub2/Packages/com.x/package.json'; [ -z \"\$(git -C '$SUPER/Packages/com.x' status --porcelain)\" ]"
 fi
 unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+
+# ------------------------------------------------------------------ 11. measure
+group "11. measure"
+FSTYPE=""; [ "$(uname -s)" = Linux ] && FSTYPE="$(stat -f -c %T "$ROOT" 2>/dev/null)"
+if [ $CLONES = 0 ]; then
+  skip "measure (needs a volume that block-clones)"
+elif [ "$FSTYPE" = zfs ]; then
+  # ZFS clones but has no FIEMAP: measure must refuse, not report all unmapped.
+  cd "$PROJ"
+  out="$(uwt measure --json 2>/dev/null)"; rc=$?
+  check "on ZFS measure refuses (exit 2)"               [ $rc = 2 ]
+  check "and says the filesystem has no physical extents" json_is '"physical extents" in d["message"]' <<<"$out"
+else
+  cd "$PROJ"
+  uwt new feature/m --path "$ROOT/wt-m" >/dev/null 2>&1
+  priv() { bash "$UWT" measure "$ROOT/wt-m" --json 2>/dev/null | "$PY" -c 'import json,sys; print([t for t in json.load(sys.stdin)["value"]["trees"] if t["reported"]][0]["private"])'; }
+  out="$(uwt measure --json 2>/dev/null)"; rc=$?
+  check "measure exits 0"                               [ $rc = 0 ]
+  check "it covers every worktree and the golden"       json_is 'any(t["name"]=="golden" for t in d["value"]["trees"]) and len(d["value"]["trees"]) == 1 + len([w for w in __import__("subprocess").run(["git","worktree","list","--porcelain"],capture_output=True,text=True).stdout.splitlines() if w.startswith("worktree ")])' <<<"$out"
+  if [ -n "$PY" ]; then
+    p0="$(priv)"; head -c 1048576 /dev/urandom > "$ROOT/wt-m/new.bin"; p1="$(priv)"   # no sync: measure flushes
+    check "a new 1 MiB file adds exactly 1 MiB private"   [ "$(( p1 - p0 ))" = 1048576 ]
+    check "the same answer twice"                          [ "$(priv)" = "$p1" ]
+  else
+    skip "measure deltas (needs python)"
+  fi
+  check "measure of a path outside the repo exits 2"    bash -c "cd '$PROJ' && bash '$UWT' measure '$ROOT' >/dev/null 2>&1; [ \$? = 2 ]"
+fi
 
 # ------------------------------------------------------------------ done
 printf '\n%d passed, %d failed, %d skipped   (fixtures in %s)\n' "$PASS" "$FAILN" "$SKIPN" "$ROOT"
