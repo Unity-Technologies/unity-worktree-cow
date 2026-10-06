@@ -1,0 +1,18 @@
+# For more information about the available options please visit: http://go/catalog-info (VPN required)
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  annotations:
+    github.com/project-slug: Unity-Technologies/unity-worktree-cow
+    backstage.io/techdocs-ref: dir:.
+  name: unity-worktree-cow
+  description: "A Claude Code skill (uwt) for running many concurrent Unity git worktrees without paying full disk for each one."
+  labels:
+    costcenter: "2021"
+  tags:
+    - planned-public
+    - enterprise
+spec:
+  type: cli
+  lifecycle: pre-production
+  owner: Unity-Technologies/partner-engineering
