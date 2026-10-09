@@ -447,6 +447,12 @@ else
     p0="$(priv)"; head -c 1048576 /dev/urandom > "$ROOT/wt-m/new.bin"; p1="$(priv)"   # no sync: measure flushes
     check "a new 1 MiB file adds exactly 1 MiB private"   [ "$(( p1 - p0 ))" = 1048576 ]
     check "the same answer twice"                          [ "$(priv)" = "$p1" ]
+    # Measured at once, no sync: a burst large enough that the write cache still
+    # holds most of it. Unflushed data has no blocks yet, so measure must flush.
+    "$PY" -c 'import os,sys
+for i in range(256): open(os.path.join(sys.argv[1], "burst%d.bin" % i), "wb").write(os.urandom(1048576))' "$ROOT/wt-m"
+    p2="$(priv)"
+    check "a 256 MiB burst measured at once adds exactly 256 MiB" [ "$(( p2 - p1 ))" = 268435456 ]
   else
     skip "measure deltas (needs python)"
   fi

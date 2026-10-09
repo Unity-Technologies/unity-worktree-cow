@@ -1,6 +1,6 @@
 ---
 name: unity-worktree
-description: Create Unity git worktrees that share disk blocks via copy-on-write, so a new worktree of a 34 GiB project costs ~0.35 GiB and ~25 s instead of ~34 GiB and a 10-minute reimport, Library included. Use when setting up parallel or agentic Unity development, when multiple checkouts are running out of disk, when asked to create a Unity worktree, or when a worktree needs its Library populated without a full reimport.
+description: Create Unity git worktrees that share disk blocks via copy-on-write, so a new worktree of a 34 GiB project costs ~0.35 GiB and ~30 s instead of ~34 GiB and a 10-minute reimport, Library included. Use when setting up parallel or agentic Unity development, when multiple checkouts are running out of disk, when asked to create a Unity worktree, or when a worktree needs its Library populated without a full reimport.
 ---
 
 # unity-worktree (uwt)
@@ -19,23 +19,30 @@ Measured per worktree on Windows 11, ReFS:
 
 | project | plain checkout + its own Library | `uwt new` | after first open + work |
 |---|---|---|---|
-| asset-heavy, 41k files | 33.6 GiB · 135 s + 617 s import | 346 MiB · 24 s | 1.99 GiB · **17×** |
-| monorepo subdir, 39k files | 16.1 GiB · 73 s + 416 s | 278 MiB · 25 s | 967 MiB · **17×** |
-| URP sample, 3k files | 3.4 GiB · 6 s + 138 s | 118 MiB · 11 s | 421 MiB · **8×** |
-| DOTS, code only | 1.1 GiB · 0.4 s + 71 s | 97 MiB · 10 s | 412 MiB · **2.7×** |
+| asset-heavy, 41k files | 33.7 GiB · 94 s + 573 s import | 344 MiB · 29 s | 1.98 GiB · **17×** |
+| monorepo subdir, 39k files | 16.3 GiB · 46 s + 370 s | 318 MiB · 28 s | 1.31 GiB · **12×** |
+| URP sample, 3k files | 3.4 GiB · 4 s + 121 s | 124 MiB · 11 s | 462 MiB · **7.6×** |
+| DOTS, code only | 1.1 GiB · 0.2 s + 61 s | 100 MiB · 9 s | 583 MiB · **2.0×** |
 | production, 41.5k files, 25 GiB Library | ~31 GiB (estimated) | 405 MiB · 34–40 s | 2.50–2.64 GiB · **~12×** |
 
-The first four are Unity 6000.7, "work" being 100 scripted edits, measured by
-per-file refcount. The fifth is Unity 6000.6 with four agent-driven editors
-compiling and running tests in parallel, measured by physical-cluster overlap.
+The first four are Unity 6000.7, "work" being a first open plus 100 scripted
+code and material edits. The fifth is Unity 6000.6 with four agent-driven
+editors compiling and running tests in parallel. All are measured by
+physical-cluster overlap (`uwt measure`). Four editors compiling and running
+tests at once on the first four projects ended within 2% of the scripted figures or below them
+(2.01–2.02 GiB on the 41k-file project).
 
-A hydrated worktree opens with 0–6 assets imported, against 3,990–23,788 cold.
+A hydrated worktree opens with 0–6 assets imported, against 4,035–23,451 cold.
 That is not a free open: the first one compiles every script assembly and
 resolves packages, because `Bee` and `ScriptAssemblies` are denied. On the
 production project it took 396–419 s with four editors opening at once:
 `CompileScripts` 205–212 s, `ImportOutOfDateAssets` 86–115 s (for ~5 actual
-imports), `InvokePackagesCallback` 34–39 s, `CategorizeAssets` ~29 s. Still
-much faster than a cold import, but budget minutes, not seconds.
+imports), `InvokePackagesCallback` 34–39 s, `CategorizeAssets` ~29 s. Most of
+that is the editors contending with each other, not the clone: on the 41k-file
+project one editor alone spends 39 s in `CompileScripts` and 7 s in
+`ImportOutOfDateAssets`, four at once 160–168 s and 17–41 s. Still much faster
+than a cold import, but budget minutes, not seconds, and stagger first opens
+when disk or CPU is tight.
 
 The first open is also where the private cost comes from. The largest item is
 usually `PackageCache`: Unity re-creates a fixed set of large package binaries
@@ -55,9 +62,11 @@ segment turns private. On Linux/btrfs, 10 texture reimports left 81 KB dead in
 a 476 MB segment, and the next open compacted it: **+455 MiB**. One reimport
 did not trigger it. The 807 MB segment held out until most of it was dead.
 A post-build golden does the same on first open. The copied entries sit at unaligned
-offsets, so no clone or dedupe can share them again. The post-build case did
-not reproduce on Windows/ReFS, where segments are 1 GiB; the reimport case is
-untested there.
+offsets, so no clone or dedupe can share them again. On Windows/ReFS the
+reimport case reproduces too: material edits compacted a segment on the
+monorepo project (+291 MiB) and the DOTS one (+140 MiB), most of their "after"
+figure above. The 41k-file project's 1 GiB segments did not compact, and the
+post-build case did not reproduce on ReFS.
 
 Budget the "after" column, not the `uwt new` one, plus about one segment for
 each round of edits that reimports textures, models or other large-artifact
@@ -300,7 +309,10 @@ A block is private to a worktree when no other tree (the main checkout and its
 reads physical extents directly: `FSCTL_GET_RETRIEVAL_POINTERS` on Windows
 (through PowerShell and inline C#), FIEMAP on Linux and `F_LOG2PHYS_EXT` on
 macOS (through `python3`). Files stored inline count as one private cluster
-each. On ReFS it takes 30 s for a 41.5k-file project with four worktrees and
+each. Data still in the write cache has no blocks yet, and a cached overwrite
+of a clone still maps to the shared ones, so `measure` flushes every file
+written in the last 30 minutes before reading it; it is safe to run right
+after work, with the editor closed. On ReFS it takes 30 s for a 41.5k-file project with four worktrees and
 the golden, ~50k files each, and gives the same answer every run. ZFS clones
 blocks but does not report physical extents, so `measure` refuses there
 (exit 2).

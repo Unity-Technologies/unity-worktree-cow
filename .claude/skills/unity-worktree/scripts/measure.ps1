@@ -41,6 +41,8 @@ public static class UwtLcn {
     static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sec, uint disp, uint flags, IntPtr tmpl);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool DeviceIoControl(SafeFileHandle h, uint code, ref long inBuf, int inLen, byte[] outBuf, int outLen, out int ret, IntPtr ov);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool FlushFileBuffers(SafeFileHandle h);
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool GetDiskFreeSpaceW(string root, out uint spc, out uint bps, out uint free, out uint total);
 
@@ -82,9 +84,28 @@ public static class UwtLcn {
         }
     }
 
+    // Data still in the write cache has no clusters yet: a file written seconds
+    // ago reads as having none, or too few. Flushing it allocates them. Opening
+    // for write and flushing changes no content or timestamp; a file another
+    // process holds without write sharing stays unflushed and is reported.
+    static bool Flush(string path) {
+        using (var h = CreateFileW(@"\\?\" + path, 0x40000000, 7, IntPtr.Zero, 3, 0, IntPtr.Zero)) {
+            return !h.IsInvalid && FlushFileBuffers(h);
+        }
+    }
+
+    static long Covered(List<long> runs, int from) {
+        long c = 0;
+        for (int i = from; i < runs.Count; i += 2) c += runs[i + 1] - runs[i];
+        return c;
+    }
+
+    static long Cluster = 4096;
+    const double RecentMinutes = 30;
+
     public class TreeResult {
         public string Root;
-        public long Files, Logical, Inline, Unreadable, Allocated, Private;
+        public long Files, Logical, Inline, Unreadable, Allocated, Private, Flushed, Unmapped;
         public Dictionary<string, long[]> Groups = new Dictionary<string, long[]>(); // files, logical, private clusters
         internal long[] Runs;              // merged [lo, hi) pairs
     }
@@ -115,8 +136,22 @@ public static class UwtLcn {
                 if (!t.Groups.TryGetValue(key, out g)) { g = new long[3]; t.Groups[key] = g; }
                 t.Files++; t.Logical += len; g[0]++; g[1] += len;
                 int before = fileRuns.Count;
+                // Recently written data may still be cached, and a cached overwrite of a
+                // clone still maps to the shared clusters it will replace: flush first.
+                if ((DateTime.UtcNow - fsi.LastWriteTimeUtc).TotalMinutes < RecentMinutes && Flush(fsi.FullName)) t.Flushed++;
                 if (!Extents(fsi.FullName, fileRuns)) { t.Unreadable++; continue; }
-                if (fileRuns.Count == before && len > 0) {
+                long need = (len + Cluster - 1) / Cluster, have = Covered(fileRuns, before);
+                bool sparse = (fsi.Attributes & FileAttributes.SparseFile) != 0;
+                // A file of one cluster or less with no extents is resident (inline);
+                // anything else short of clusters is unallocated cache: flush, ask again.
+                if (have < need && !sparse && !(have == 0 && len <= Cluster)) {
+                    fileRuns.RemoveRange(before, fileRuns.Count - before);
+                    if (Flush(fsi.FullName)) t.Flushed++;
+                    if (!Extents(fsi.FullName, fileRuns)) { t.Unreadable++; continue; }
+                    have = Covered(fileRuns, before);
+                    if (have < need) t.Unmapped += (need - have) * Cluster;
+                }
+                if (fileRuns.Count == before && len > 0 && len <= Cluster) {
                     t.Inline++; g[2]++;   // resident: one cluster, owned by nobody else
                 }
                 for (int i = before; i < fileRuns.Count; i += 2) fileGroup.Add(key);
@@ -152,6 +187,7 @@ public static class UwtLcn {
 
     public static TreeResult[] Measure(string[] roots, bool[] report, int by) {
         int n = roots.Length;
+        Cluster = ClusterBytes(roots[0]);
         var skip = new HashSet<string>();
         foreach (var r in roots) skip.Add(r.TrimEnd('\\').ToLowerInvariant());
         var res = new TreeResult[n];
@@ -206,14 +242,15 @@ for ($k = 0; $k -lt $res.Count; $k++) {
     $row = [ordered]@{
         name = $names[$k]; path = $r.Root; reported = $report[$k]
         files = $r.Files; logical = $r.Logical; inline_files = $r.Inline; unreadable = $r.Unreadable
-        allocated = $r.Allocated * $cl
+        flushed = $r.Flushed; unmapped = $r.Unmapped; allocated = $r.Allocated * $cl
     }
     if ($report[$k]) {
         $row.private = $r.Private * $cl
         $row.shared = ($r.Allocated - $r.Private) * $cl
         $row.groups = [ordered]@{}
-        foreach ($g in ($r.Groups.GetEnumerator() | Sort-Object { -$_.Value[2] } | Select-Object -First 25)) {
-            if ($g.Value[2] -gt 0) { $row.groups[$g.Key] = [ordered]@{ files = $g.Value[0]; logical = $g.Value[1]; private = $g.Value[2] * $cl } }
+        # Every group, largest private first: JSON consumers sum them, so none are dropped.
+        foreach ($g in ($r.Groups.GetEnumerator() | Sort-Object { -$_.Value[2] })) {
+            $row.groups[$g.Key] = [ordered]@{ files = $g.Value[0]; logical = $g.Value[1]; private = $g.Value[2] * $cl }
         }
     }
     $out.trees += $row
@@ -228,10 +265,14 @@ foreach ($t in $out.trees) {
     '{0,-12} {1,9:N0} {2,8:N0} MiB {3,8:N0} MiB {4,8:N0} MiB {5,7:N1}%' -f $t.name, $t.files, ($t.logical / $MB), ($t.allocated / $MB), ($t.private / $MB), $pct
 }
 foreach ($t in $out.trees) {
-    if (-not $t.reported -or $t.groups.Count -eq 0) { continue }
+    if (-not $t.reported) { continue }
+    $top = @($t.groups.Keys | Where-Object { $t.groups[$_].private -gt 0 } | Select-Object -First 10)
+    if ($top.Count -eq 0) { continue }
     ''; "largest private in $($t.name):"
-    foreach ($k in @($t.groups.Keys)[0..([Math]::Min(9, $t.groups.Count - 1))]) {
+    foreach ($k in $top) {
         '  {0,10:N1} MiB  {1,8:N0} files  {2}' -f ($t.groups[$k].private / $MB), $t.groups[$k].files, $k
     }
 }
+$um = ($out.trees | Measure-Object unmapped -Sum).Sum
+if ($um) { ''; 'unmapped {0:N1} MiB: still not allocated after a flush (a file held open without write sharing); counted neither way' -f ($um / $MB) }
 "($($res.Count) trees, $secs s, $cl-byte clusters; inline files count one cluster each)"

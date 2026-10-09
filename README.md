@@ -12,23 +12,24 @@ Measured per worktree on Windows 11, ReFS:
 
 | project | plain checkout + its own Library | `uwt new` | after first open + work |
 |---|---|---|---|
-| asset-heavy, 41k files | 33.6 GiB · 135 s + 617 s import | 346 MiB · 24 s | 1.99 GiB · **17×** |
-| monorepo subdir, 39k files | 16.1 GiB · 73 s + 416 s | 278 MiB · 25 s | 967 MiB · **17×** |
-| URP sample, 3k files | 3.4 GiB · 6 s + 138 s | 118 MiB · 11 s | 421 MiB · **8×** |
-| DOTS, code only | 1.1 GiB · 0.4 s + 71 s | 97 MiB · 10 s | 412 MiB · **2.7×** |
+| asset-heavy, 41k files | 33.7 GiB · 94 s + 573 s import | 344 MiB · 29 s | 1.98 GiB · **17×** |
+| monorepo subdir, 39k files | 16.3 GiB · 46 s + 370 s | 318 MiB · 28 s | 1.31 GiB · **12×** |
+| URP sample, 3k files | 3.4 GiB · 4 s + 121 s | 124 MiB · 11 s | 462 MiB · **7.6×** |
+| DOTS, code only | 1.1 GiB · 0.2 s + 61 s | 100 MiB · 9 s | 583 MiB · **2.0×** |
 | production, 41.5k files, 25 GiB Library | ~31 GiB (estimated) | 405 MiB · 34–40 s | 2.50–2.64 GiB · **~12×** |
 
-The first four are Unity 6000.7 after 100 scripted edits, measured by per-file
-refcount; the fifth is Unity 6000.6 after four agent-driven editors compiled
-and ran tests in parallel, measured by physical-cluster overlap.
+The first four are Unity 6000.7 after a first open and 100 scripted edits; the
+fifth is Unity 6000.6 after four agent-driven editors compiled and ran tests in
+parallel. All are measured by physical-cluster overlap (`uwt measure`).
 
 A hydrated worktree opens without a reimport (0–6 assets imported, against
-3,990–23,788 cold) but not without a compile: the first open rebuilds every
-script assembly and resolves packages, about 400 s on the production project.
+4,035–23,451 cold) but not without a compile: the first open rebuilds every
+script assembly and resolves packages, about 400 s on the production project
+with four editors opening at once, most of it contention between them.
 Its cost is about one 4 KiB cluster per file, so it is close
 to fixed per project and the saving grows with project size. After the first
 open it grows slowly, except that on Unity 6.6+ a texture or model reimport
-can turn a whole `DataStore` segment private (~0.5 GiB); see `SKILL.md`.
+can turn a whole `DataStore` segment private (0.1–0.5 GiB); see `SKILL.md`.
 
 ## Use it
 

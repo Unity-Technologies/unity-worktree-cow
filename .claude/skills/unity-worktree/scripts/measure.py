@@ -13,8 +13,9 @@ macOS (APFS). ZFS clones blocks but has no FIEMAP (OpenZFS 2.4 answers
 EOPNOTSUPP), so there this exits 1 rather than report every file unmapped.
 Inline data (btrfs, small files) counts as one private block. On Linux each
 file is flushed before it is mapped (FIEMAP_FLAG_SYNC), so delayed-allocation
-data gets its physical block; on macOS run `sync` first: data with no physical
-block yet is reported as `unmapped`, counted neither way.
+data gets its physical block; on macOS every file written in the last 30
+minutes is fsync'd first. Data still with no physical block is reported as
+`unmapped`, counted neither way.
 
 The macOS reader is the one measure-space-apfs.py used. The Linux reader is
 verified on btrfs and XFS by tests/run-tests.sh group 11.
@@ -24,6 +25,7 @@ Called by `uwt measure`; usable on its own.
 import argparse, bisect, errno, fcntl, json, os, struct, sys, time
 
 BLOCK = 4096
+RECENT_SECS = 30 * 60      # files written this recently are flushed before mapping (macOS)
 
 
 class Unsupported(Exception):
@@ -136,6 +138,13 @@ def walk(root, skip, by):
                 t['unreadable'] += 1
                 continue
             try:
+                # macOS: a cached write, even an overwrite of a clone, still maps to the
+                # old blocks until flushed. Linux flushes through FIEMAP_FLAG_SYNC.
+                if sys.platform == 'darwin' and time.time() - st.st_mtime < RECENT_SECS:
+                    try:
+                        os.fsync(fd)
+                    except OSError:
+                        pass
                 ex, inl, um = extents(fd, st.st_size)
             finally:
                 os.close(fd)
@@ -192,8 +201,9 @@ def main():
         if report[k]:
             row['private'] = t['private']
             row['shared'] = t['allocated'] - t['private']
-            top = sorted(t['groups'].items(), key=lambda kv: -kv[1][2])[:25]
-            row['groups'] = {g: {'files': v[0], 'logical': v[1], 'private': v[2]} for g, v in top if v[2]}
+            # Every group, largest private first: JSON consumers sum them, so none are dropped.
+            ordered = sorted(t['groups'].items(), key=lambda kv: -kv[1][2])
+            row['groups'] = {g: {'files': v[0], 'logical': v[1], 'private': v[2]} for g, v in ordered}
         out['trees'].append(row)
     if a.json:
         print(json.dumps(out, separators=(',', ':')))
@@ -207,9 +217,10 @@ def main():
             print(f"{t['name']:<12} {t['files']:>9,} {t['logical'] / mib:>8,.0f} MiB {t['allocated'] / mib:>8,.0f} MiB "
                   f"{t['private'] / mib:>8,.0f} MiB {pct:>7.1f}%")
     for t in out['trees']:
-        if t['reported'] and t['groups']:
+        top = [(g, v) for g, v in t.get('groups', {}).items() if v['private']][:10]
+        if t['reported'] and top:
             print(f"\nlargest private in {t['name']}:")
-            for g, v in list(t['groups'].items())[:10]:
+            for g, v in top:
                 print(f"  {v['private'] / mib:>10,.1f} MiB  {v['files']:>8,} files  {g}")
     um = sum(t['unmapped'] for t in out['trees'])
     if um:
