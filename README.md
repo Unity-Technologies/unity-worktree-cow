@@ -1,12 +1,14 @@
 # unity-worktree-cow
 
-A Claude Code skill (`uwt`) for running many concurrent Unity git worktrees
-without paying full disk for each one.
+A Claude Code skill, unity-worktree-cow (`uwt` for short), for running many
+concurrent Unity git worktrees without paying full disk for each one.
 
 One golden snapshot of the project (working tree + `Library/`) is taken while
 the editor is closed. Every new worktree is a block-clone of that snapshot,
 which git then reconciles to the requested branch. Each worktree owns a real,
 private `Library/`; only the disk blocks are shared, and they diverge on write.
+Unity Version Control (Plastic) workspaces work the same way, with `cm` doing
+the reconciling; see `SKILL.md`.
 
 Measured per worktree on Windows 11, ReFS:
 
@@ -33,18 +35,19 @@ can turn a whole `DataStore` segment private (0.1–0.5 GiB); see `SKILL.md`.
 
 ## Use it
 
-Copy `.claude/skills/unity-worktree/` into the target repo and commit it, so
+Copy `.claude/skills/unity-worktree-cow/` into the target repo and commit it, so
 the worktrees it creates carry it too. Then, in a
 checkout whose `Library/` is imported and whose editor is **closed**:
 
 ```bash
-uwt=.claude/skills/unity-worktree/scripts/unity-worktree.sh
+uwt=.claude/skills/unity-worktree-cow/scripts/unity-worktree-cow.sh
 $uwt doctor                  # proves this volume block-clones; run first
 $uwt seed                    # snapshot project + Library into .git/uwt/golden
 $uwt new feature/x           # git worktree add + clone + hydrate, ~seconds
 $uwt hydrate path/to/wt      # give a worktree someone else created a Library
 $uwt list --json             # every worktree, and where its Library came from
 $uwt remove path/to/wt       # git worktree remove, refused while an editor has it open
+                             # (--delete-branch: also the branch, if it holds no work)
 $uwt measure                 # private disk of every worktree and the golden
 ```
 
@@ -74,13 +77,13 @@ On anything else `doctor` says so and the tool refuses. There is no copy
 fallback: a byte copy of the project is the problem this exists to avoid.
 
 Dependencies are bash, git and coreutils. Windows adds robocopy and fsutil,
-both in-box. `measure` alone also needs PowerShell on Windows (in-box) or
+both in-box. Plastic workspaces need `cm` on `PATH`. `measure` alone also needs PowerShell on Windows (in-box) or
 `python3` elsewhere, because reading physical extents needs ioctls. The editor interlock needs nothing extra: a rename probe on
 Windows, a `/proc` scan on Linux, `lsof` on macOS.
 
 ## Documentation
 
-`.claude/skills/unity-worktree/SKILL.md` is the full reference: commands, what
+`.claude/skills/unity-worktree-cow/SKILL.md` is the full reference: commands, what
 is and is not cloned and why, the cost model, how to measure sharing, and
 troubleshooting.
 

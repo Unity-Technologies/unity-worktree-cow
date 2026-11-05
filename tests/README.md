@@ -27,10 +27,27 @@ Synthetic fixtures: a fake git repo shaped like a Unity project with a fake
 | 5 | `hydrate` fills a plain worktree, refuses to overwrite without `--force`, warns on a Unity version mismatch |
 | 6 | CLI errors exit 2 |
 | 7 | a project in a subdirectory of its repo: `seed` records the prefix, `new` clones back to it and leaves files outside it to git, `hydrate` given the worktree root finds the project |
-| 8 | `list` (text and `--json`) and where each `Library` came from; `remove` refuses the main worktree, a non-root path, a dirty worktree without `--force`, and a worktree whose `ArtifactDB` is open (exit 3), and keeps the branch; `new --json` success and error records; `new --verify` rolls back a snapshot whose content changed behind matching stat data (which plain `new` lets through on Windows), runs its fresh-index pass only on Windows, and a configured `core.checkStat=minimal` does not weaken the check |
+| 8 | `list` (text and `--json`) and where each `Library` came from; `remove` refuses the main worktree, a non-root path, a dirty worktree without `--force`, and a worktree whose `ArtifactDB` is open (exit 3), and keeps the branch, or with `--delete-branch` deletes it only when it has no commits of its own; `new --json` success and error records; `new --verify` rolls back a snapshot whose content changed behind matching stat data (which plain `new` lets through on Windows), runs its fresh-index pass only on Windows, and a configured `core.checkStat=minimal` does not weaken the check |
 | 9 | the case-collision detector (file and directory level) everywhere; through `new`, refusal on a case-folding volume (macOS CI) or success on a case-sensitive one |
 | 10 | submodules: `new` leaves them empty rather than cloning the source's `.git` link, the worktree is clean, the source is untouched; `--init-submodules` gives the worktree its own submodule repository |
 | 11 | `measure` covers every worktree and the golden, a new 1 MiB file adds exactly 1 MiB private with no `sync`, the answer repeats; on ZFS, which has no physical extents to read, it refuses with exit 2 |
+| 12 | Plastic: `doctor`, `seed` into `.plastic/uwt` (refuses a checkout, warns on local and hidden edits); `new` with a bare name, an existing branch, `--base` label and branch, its own workspace identity, a clean status, the source's edits and private files gone; refusals before anything is created (bad base, workspace name in use, `--init-submodules`); `--verify` rolls back a golden changed behind matching stat data, and refuses under `eolconversion.conf`; `hydrate` in a hand-made workspace; `list` (including a workspace that names the server differently), `measure`; `remove` refuses main, private files and checkouts, and `--force` undoes the checkout; `--delete-branch` deletes only a branch with no changesets that no other workspace is on; a partial (Gluon) workspace is refused; a project in a subdirectory, and removing a workspace whose main was deleted |
+
+Group 12 needs `cm` and a Plastic server, `local` by default
+(`UWT_TEST_PLASTIC_SERVER` to change it), and a volume that clones; otherwise
+it is skipped. It creates and deletes `uwt-test-*` repositories there. A Unity
+Cloud organization keeps repos under a project that must already exist:
+
+```
+UWT_TEST_PLASTIC_SERVER=MyOrg@unity UWT_TEST_PLASTIC_PROJECT=uwt-test bash tests/run-tests.sh E:/uwt-tests
+```
+
+A machine that cannot sign in to Unity Cloud can borrow another machine's
+local server, which needs no login: `ssh -N -R 8084:127.0.0.1:8084 user@mac`
+from the server's machine, then set the client to name mode and
+`UWT_TEST_PLASTIC_SERVER=localhost:8084`.
+
+CI has neither, so it runs locally only.
 
 CI also runs the suite on Linux on loopback btrfs, XFS (`reflink=1`) and ZFS
 volumes, so every group runs on each filesystem `uwt` supports there.

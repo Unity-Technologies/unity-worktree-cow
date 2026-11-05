@@ -1,9 +1,9 @@
 ---
-name: unity-worktree
-description: Create Unity git worktrees that share disk blocks via copy-on-write, so a new worktree of a 34 GiB project costs ~0.35 GiB and ~30 s instead of ~34 GiB and a 10-minute reimport, Library included. Use when setting up parallel or agentic Unity development, when multiple checkouts are running out of disk, when asked to create a Unity worktree, or when a worktree needs its Library populated without a full reimport.
+name: unity-worktree-cow
+description: Create Unity git worktrees, or Unity Version Control (Plastic) workspaces, that share disk blocks via copy-on-write, so a new worktree of a 34 GiB project costs ~0.35 GiB and ~30 s instead of ~34 GiB and a 10-minute reimport, Library included. Use when setting up parallel or agentic Unity development, when multiple checkouts or workspaces are running out of disk, when asked to create a Unity worktree or workspace, or when one needs its Library populated without a full reimport.
 ---
 
-# unity-worktree (uwt)
+# unity-worktree-cow (uwt)
 
 Run many concurrent Unity worktrees without paying full disk for each one.
 
@@ -74,7 +74,7 @@ assets.
 
 ## Quick start
 
-Commit `.claude/skills/unity-worktree/` to the repo. `new` resets every
+Commit `.claude/skills/unity-worktree-cow/` to the repo. `new` resets every
 worktree to its branch and cleans untracked files, so an uncommitted skill is
 not in the worktrees it creates, and agents working there cannot reach uwt
 (`new` warns, and its JSON carries the script's absolute path as `uwt`).
@@ -82,7 +82,7 @@ not in the worktrees it creates, and agents working there cannot reach uwt
 In a checkout whose `Library/` is imported and whose editor is **closed**:
 
 ```bash
-uwt=.claude/skills/unity-worktree/scripts/unity-worktree.sh   # Git Bash on Windows
+uwt=.claude/skills/unity-worktree-cow/scripts/unity-worktree-cow.sh   # Git Bash on Windows
 $uwt doctor                  # ALWAYS first: a live clone probe, not a capability flag
 $uwt seed                    # snapshot project + Library into .git/uwt/golden
 $uwt new feature/my-thing    # git worktree add + clone + hydrate
@@ -105,7 +105,7 @@ $uwt hydrate path/to/that/worktree
 | `hydrate [PATH] [--force]` | Gives an existing worktree a `Library/` cloned from the golden. |
 | `list [PATH] [--json]` | Every worktree of the repo, including ones uwt did not create, with its branch, lock state, and whether its `Library/` came from uwt (`uwt`), from an editor (`other`), or is absent (`none`). |
 | `measure [PATH...] [--by N] [--json]` | Private disk of each worktree and the golden against all the others, by physical-block overlap, with the largest private groups. Read-only. See "Measuring it yourself". |
-| `remove PATH [--force] [--json]` | `git worktree remove` behind the editor interlock. A dirty worktree needs `--force`; a locked one needs `git worktree unlock` first; the branch is kept. Refuses the main worktree. |
+| `remove PATH [--force] [--delete-branch] [--json]` | `git worktree remove` behind the editor interlock. A dirty worktree needs `--force`; a locked one needs `git worktree unlock` first. The branch is kept, or with `--delete-branch` deleted as `git branch -d` would, only when it holds no work of its own. Refuses the main worktree. |
 
 Run `new` from inside the repo. `--path` is relative to your directory; the
 default is `<repo>-<branch>` beside the repo. Several `new` calls can run at
@@ -121,7 +121,8 @@ stderr and stdout carries exactly one record, either
 `{"status":"ok","command":"new","value":{...}}` or
 `{"status":"error","exit":2,"message":"..."}`. `new`'s value has `path`,
 `project`, `uwt` (this script's absolute path), `branch`, `head`, `seconds`,
-`verified` and `submodules_uninitialized`.
+`verified` and `submodules_uninitialized`; `remove`'s has `path`, `branch` and
+`branch_deleted`.
 
 A project in a subdirectory of its repo (a monorepo) works: `seed` records
 the offset and `new` clones the snapshot back to it. Tracked files outside the
@@ -145,6 +146,56 @@ tool exists to avoid. A silent byte copy is also the single most likely way a
 do-it-yourself version of this goes wrong: robocopy on NTFS or on a pre-24H2
 build, `cp` without `--reflink`, or a cross-volume target all copy 24 GiB and
 say nothing.
+
+## Unity Version Control (Plastic)
+
+Plastic workspaces get the same commands. uwt picks git or Plastic by the
+nearest `.git` or `.plastic` above the project; `cm` must be on `PATH` and
+the server reachable. On the 41.5k-file project a new workspace cost 353 MiB
+and ~10 s, and opened with 0 assets imported.
+
+- **The golden** is `<main workspace>/.plastic/uwt/golden`, with the
+  workspace's `plastic.wktree` and `plastic.selector` beside it. The wktree is
+  cm's equivalent of git's index: mtime and size per file, trusted without a
+  rehash. Workspaces are independent, so the seeded one is main; workspaces uwt
+  creates point back to it in `.plastic/uwt-main`, and one made by hand finds
+  it among the repo's workspaces.
+- **`new BRANCH`** takes a branch path (`/main/task`); a bare name is a child
+  of the current branch. A missing branch is created on the server, where the
+  team sees it, from `--base` (`cs:N`, `lb:NAME`, `br:/path`; default the
+  current changeset), and only once the workspace is known good. Steps:
+  `cm workspace create` into an empty directory (its own name and GUID), clone
+  the snapshot, place the snapshot's wktree and selector (never
+  `plastic.workspace`), `cm undo -r` to the snapshot's changeset, `cm switch`,
+  require zero pending or local changes, delete private and ignored files,
+  hydrate. The workspace is named after its directory, which must be unused
+  as a workspace name on the machine. Rolls back on failure, branch included.
+- **`seed` refuses pending changes** (checkouts, adds, moves, deletes,
+  merges): the wktree would carry them, and any exclusive lock a checkout
+  holds, into every workspace. Edits without a checkout only warn, as with
+  git. Edits hidden by `hidden_changes.conf` do not carry over either: `cm
+  undo` ignores them, so `new` deletes them and undo restores the file.
+- **`--verify` on every OS.** It hashes every controlled file against the
+  server's MD5. cm never re-hashes a clone the way git does on macOS and
+  Linux, so without it a snapshot file changed behind matching mtime and size
+  gets through. It refuses where `eolconversion.conf` is in effect: converted
+  text files cannot match the server's hashes.
+- **`remove`** refuses pending changes, edits and private files without
+  `--force`; with it, pending changes are undone first, which releases their
+  locks, then `cm workspace delete`. Refuses the main workspace (the one
+  holding the golden). The branch is kept; `--delete-branch` deletes it from
+  the server only when it has no changesets and no other workspace is on it,
+  so the branches `new` creates need not pile up for the team to see.
+- **Cloud repositories** work the same as a local server. Unity Cloud
+  organizations are addressed as `org@unity` (not the older `org@cloud`), and
+  keep repos under a project, `Project/Repo@org@unity`; the project must
+  exist in the Unity Cloud dashboard before `cm` can create a repo in it.
+- **Not supported:** partial (Gluon) and dynamic workspaces, which are
+  refused. `--init-submodules` is git only; Xlinks are left to cm and are
+  untested.
+- **Tested** by the suite on ReFS, APFS and btrfs, against a local server and
+  Unity Cloud; end to end with a real project (seed, `new`, editor open) on
+  Windows only.
 
 ## Rules that matter
 

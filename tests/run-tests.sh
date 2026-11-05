@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Regression suite for scripts/unity-worktree.sh. Synthetic fixtures only: a
+# Regression suite for scripts/unity-worktree-cow.sh. Synthetic fixtures only: a
 # fake Unity project and a fake Library, built in a temp directory. No Unity.
 #
 # usage: tests/run-tests.sh [ROOT]
@@ -13,7 +13,7 @@
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-UWT="$HERE/../.claude/skills/unity-worktree/scripts/unity-worktree.sh"
+UWT="$HERE/../.claude/skills/unity-worktree-cow/scripts/unity-worktree-cow.sh"
 [ -f "$UWT" ] || { echo "missing $UWT"; exit 2; }
 
 ROOT="${1:-$(mktemp -d "${TMPDIR:-/tmp}/uwt-tests-XXXXXX")}"
@@ -305,6 +305,17 @@ if [ $CLONES = 1 ]; then
   check "remove unregisters it"                  bash -c "! git -C '$PROJ' worktree list | grep -q 'wt-j'"
   check "remove of a clean worktree needs no --force (its ignored Library does not count)" \
         bash -c "bash '$UWT' remove '$ROOT/wt-keep' >/dev/null 2>&1 && [ ! -e '$ROOT/wt-keep' ]"
+  uwt new feature/del --path "$ROOT/wt-del" >/dev/null 2>&1
+  out="$(uwt remove "$ROOT/wt-del" --delete-branch --json 2>/dev/null)"; rc=$?
+  check "remove --delete-branch deletes a branch with no work of its own" \
+        bash -c "[ $rc = 0 ] && ! git -C '$PROJ' rev-parse --verify --quiet refs/heads/feature/del >/dev/null"
+  check "and says so in --json"                  json_is 'd["value"]["branch_deleted"] is True' <<<"$out"
+  uwt new feature/del2 --path "$ROOT/wt-del2" >/dev/null 2>&1
+  git -C "$ROOT/wt-del2" commit -q --allow-empty -m work
+  out="$(uwt remove "$ROOT/wt-del2" --delete-branch --json 2>/dev/null)"; rc=$?
+  check "remove --delete-branch keeps a branch with commits, and still removes" \
+        bash -c "[ $rc = 0 ] && [ ! -e '$ROOT/wt-del2' ] && git -C '$PROJ' rev-parse --verify --quiet refs/heads/feature/del2 >/dev/null"
+  check "and says so in --json"                  json_is 'd["value"]["branch_deleted"] is False' <<<"$out"
   if [ "$WIN" = 0 ]; then
     # Through a symlinked parent, as macOS's temp dir is (/var -> /private/var):
     # git reports the resolved path, the caller passes the logical one. The
@@ -457,6 +468,236 @@ for i in range(256): open(os.path.join(sys.argv[1], "burst%d.bin" % i), "wb").wr
     skip "measure deltas (needs python)"
   fi
   check "measure of a path outside the repo exits 2"    bash -c "cd '$PROJ' && bash '$UWT' measure '$ROOT' >/dev/null 2>&1; [ \$? = 2 ]"
+fi
+
+# ------------------------------------------------------------------ 12. plastic
+# The same lifecycle on a Unity Version Control (Plastic) workspace. Needs cm
+# and a reachable server: UWT_TEST_PLASTIC_SERVER, default "local" (the
+# server a client install sets up). A Unity Cloud organization (org@unity)
+# keeps repos under a project, which must already exist: name it in
+# UWT_TEST_PLASTIC_PROJECT. Each run makes throwaway repos named uwt-test-*,
+# and deletes them, and any a crashed run left, at the end.
+group "12. plastic"
+PS="${UWT_TEST_PLASTIC_SERVER:-local}"
+PP="${UWT_TEST_PLASTIC_PROJECT:+$UWT_TEST_PLASTIC_PROJECT/}"
+pcm() { if [ "$WIN" = 1 ]; then MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cm "$@"; else cm "$@"; fi; }
+pwp() { if [ "$WIN" = 1 ]; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+if ! command -v cm >/dev/null 2>&1; then skip "plastic group (cm not on PATH)"
+elif ! pcm repository list "$PS" >/dev/null 2>&1; then skip "plastic group (no Plastic server reachable as '$PS'; set UWT_TEST_PLASTIC_SERVER)"
+elif [ $CLONES = 0 ]; then skip "plastic group (this volume cannot block-clone)"
+else
+  # Leftovers of an earlier run: workspaces under ROOT, then uwt-test-* repos.
+  pl_sweep() {
+    local p
+    pcm workspace list --format='{path}' 2>/dev/null | tr -d '\r' | while IFS= read -r p; do
+      [ "$WIN" = 1 ] && p="$(cygpath -u "$p")"
+      case "$p" in "$ROOT"/*) pcm workspace delete "$(pwp "$p")" >/dev/null 2>&1; rm -rf "$p" ;; esac
+    done
+    pcm repository list "$PS" --format='{repname}' 2>/dev/null | tr -d '\r' | grep -F "${PP}uwt-test-" | grep "^${PP}uwt-test-" \
+      | while IFS= read -r p; do pcm repository delete "$p@$PS" >/dev/null 2>&1; done
+  }
+  pl_sweep
+  PR="${PP}uwt-test-$$@$PS"; PM="$ROOT/uwtp"
+  pcm repository create "$PR" >/dev/null 2>&1
+  pcm workspace create uwtp "$(pwp "$PM")" "$PR" >/dev/null 2>&1
+  (
+    cd "$PM" || exit 1
+    mkdir -p ProjectSettings Assets/Scenes Packages
+    printf 'm_EditorVersion: 6000.7.0b1\nm_EditorVersionWithRevision: 6000.7.0b1 (deadbeef)\n' > ProjectSettings/ProjectVersion.txt
+    echo scene > Assets/Scenes/A.unity; echo '{}' > Packages/manifest.json; echo tracked > README.md
+    printf '/Library\n/Temp\n/obj\n*.csproj\n' > ignore.conf
+    pcm checkin --all --private -c init >/dev/null 2>&1
+    pcm label create "lb:L1@$PR" "cs:1@$PR" >/dev/null 2>&1
+    pcm branch create "br:/main/feat@$PR" >/dev/null 2>&1
+    pcm switch br:/main/feat --noinput >/dev/null 2>&1
+    echo changed > Assets/Scenes/A.unity; echo new > Assets/new.txt; rm README.md
+    pcm checkin --all --private -c feat >/dev/null 2>&1
+    pcm switch br:/main --noinput >/dev/null 2>&1
+    echo second > Assets/second.txt; pcm checkin --all --private -c second >/dev/null 2>&1
+    mkdir -p Library/PackageCache/com.x@abc Library/DataStore Library/Bee Library/ScriptAssemblies Temp
+    head -c 300000 /dev/urandom > Library/ArtifactDB; head -c 200000 /dev/urandom > Library/SourceAssetDB
+    head -c 100000 /dev/urandom > Library/DataStore/uds.db; echo pkg > Library/PackageCache/com.x@abc/package.json
+    echo dag > Library/Bee/x.dag; echo dll > Library/ScriptAssemblies/a.dll; : > Library/ArtifactDB-lock
+    : > Temp/UnityLockfile; echo x > Foo.csproj
+    echo private > scratch.txt   # private, not ignored: must not survive `new`
+  )
+  PGD="$PM/.plastic/uwt/golden"
+  pstat() { pcm status "$(pwp "$1")" --controlledchanged --changed --localdeleted --localmoved --short 2>/dev/null | tr -d '\r' | grep -c . ; }
+  pguid() { sed -n 2p "$1/.plastic/plastic.workspace" | tr -d '\r'; }
+  registered() { pcm workspace list --format='{path}' 2>/dev/null | tr -d '\r' | grep -qixF "$(pwp "$1")"; }
+  pbranch() { pcm ls / --tree="br:$1@$PR" >/dev/null 2>&1; }
+  check "fixture: a Plastic workspace on /main with a clean status" bash -c "[ $(pstat "$PM") = 0 ] && [ -f '$PM/ProjectSettings/ProjectVersion.txt' ]"
+
+  out="$(uwt doctor "$PM" 2>&1)"; rc=$?
+  check "doctor exits 0 on a Plastic workspace"         [ $rc = 0 ]
+  check "doctor says plastic and names the repo"        grep -q "plastic.*repo: ${PR}" <<<"$out"
+
+  out="$(uwt seed "$PM" 2>&1)"; rc=$?
+  check "seed exits 0"                                  [ $rc = 0 ]
+  check "the golden is in the main workspace's .plastic" exists "$PGD.txt" "$PGD.wktree" "$PGD.selector" "$PGD/Library/ArtifactDB"
+  check "golden records vcs, repo and the changeset"    bash -c "grep -qx 'vcs=plastic' '$PGD.txt' && grep -qx 'repo=$PR' '$PGD.txt' && grep -qx 'commit=3' '$PGD.txt'"
+  check ".plastic, Temp and the denied Library entries are not in the golden" \
+        absent "$PGD/.plastic" "$PGD/Temp" "$PGD/Foo.csproj" "$PGD/Library/Bee" "$PGD/Library/ArtifactDB-lock"
+  check "the golden is invisible to cm status"          [ "$(pstat "$PM")" = 0 ]
+
+  pcm checkout "$(pwp "$PM/README.md")" >/dev/null 2>&1
+  out="$(uwt seed "$PM" --force 2>&1)"; rc=$?
+  check "seed refuses a checkout (exit 2)"              [ $rc = 2 ]
+  check "and says why"                                  grep -q 'pending change' <<<"$out"
+  check "and keeps the previous golden"                 exists "$PGD.txt" "$PGD.wktree"
+  pcm undo -r "$(pwp "$PM")" >/dev/null 2>&1
+
+  # A local edit, and one hidden by hidden_changes.conf: both in the snapshot.
+  echo edited > "$PM/Assets/Scenes/A.unity"; echo edited > "$PM/README.md"
+  printf '/README.md\n' > "$PM/hidden_changes.conf"
+  out="$(uwt seed "$PM" --force 2>&1)"; rc=$?
+  check "seed with local and hidden edits exits 0"     [ $rc = 0 ]
+  check "warning that they do not carry over"           grep -q 'local change' <<<"$out"
+
+  cd "$PM"
+  out="$(uwt new task1 --json 2>/dev/null)"; rc=$?
+  PT1="$ROOT/uwtp-main-task1"
+  check "new task1 exits 0"                             [ $rc = 0 ]
+  check "a bare name becomes a child of the current branch" json_is 'd["value"]["branch"] == "/main/task1" and d["value"]["head"].startswith("cs:")' <<<"$out"
+  check "the branch exists on the server"               pbranch /main/task1
+  check "the workspace is registered with cm"           registered "$PT1"
+  check "under its own identity, not the source's"      bash -c "[ '$(pguid "$PT1")' != '$(pguid "$PM")' ] && [ -n '$(pguid "$PT1")' ]"
+  check "it records the main workspace"                 bash -c "[ \"\$(head -1 '$PT1/.plastic/uwt-main')\" = '$PM' ]"
+  check "cm status is clean"                            [ "$(pstat "$PT1")" = 0 ]
+  check "the source's local edit did not carry over"    grep -qx scene "$PT1/Assets/Scenes/A.unity"
+  check "nor its hidden edit"                           grep -qx tracked "$PT1/README.md"
+  check "private files from the snapshot are gone"      absent "$PT1/scratch.txt" "$PT1/Temp" "$PT1/Foo.csproj"
+  check "Library hydrated, denied entries absent"       bash -c "[ -s '$PT1/Library/ArtifactDB' ] && [ -f '$PT1/Library/.uwt-hydration.txt' ] && [ ! -e '$PT1/Library/Bee' ]"
+  check "the source is untouched"                       bash -c "grep -qx edited '$PM/README.md' && [ -f '$PM/scratch.txt' ]"
+  rm -f "$PM/hidden_changes.conf"; pcm undo -r "$(pwp "$PM")" >/dev/null 2>&1
+  uwt seed "$PM" --force >/dev/null 2>&1   # a clean golden again for what follows
+
+  out="$(uwt new /main/feat --path "$ROOT/uwtp-feat" 2>&1)"; rc=$?
+  check "new on an existing branch exits 0"             [ $rc = 0 ]
+  check "with that branch's content"                    bash -c "grep -qx changed '$ROOT/uwtp-feat/Assets/Scenes/A.unity' && [ -f '$ROOT/uwtp-feat/Assets/new.txt' ] && [ ! -e '$ROOT/uwtp-feat/README.md' ] && [ ! -e '$ROOT/uwtp-feat/Assets/second.txt' ]"
+  check "and a clean status"                            [ "$(pstat "$ROOT/uwtp-feat")" = 0 ]
+
+  out="$(uwt new /main/fromlabel --base lb:L1 --path "$ROOT/uwtp-lb" 2>&1)"; rc=$?
+  check "new --base lb:L1 starts the branch at the label" bash -c "[ $rc = 0 ] && [ ! -e '$ROOT/uwtp-lb/Assets/second.txt' ] && [ -f '$ROOT/uwtp-lb/README.md' ]"
+  out="$(uwt new /main/fromfeat --base br:/main/feat --path "$ROOT/uwtp-bf" 2>&1)"; rc=$?
+  check "new --base br:/main/feat starts at that branch's head" bash -c "[ $rc = 0 ] && [ -f '$ROOT/uwtp-bf/Assets/new.txt' ]"
+
+  out="$(uwt new /main/bad --base cs:999 --path "$ROOT/uwtp-bad" 2>&1)"; rc=$?
+  check "a base that does not exist: exit 2, nothing created" \
+        bash -c "[ $rc = 2 ] && [ ! -e '$ROOT/uwtp-bad' ]"
+  check "and no branch"                                 bash -c "! MSYS_NO_PATHCONV=1 cm ls / --tree='br:/main/bad@$PR' >/dev/null 2>&1"
+  out="$(uwt new /main/dup --path "$ROOT/sub/uwtp-feat" 2>&1)"; rc=$?
+  check "a workspace name already in use: exit 2, nothing created" bash -c "[ $rc = 2 ] && [ ! -e '$ROOT/sub/uwtp-feat' ]"
+  check "and says the name is taken"                    grep -q 'already exists' <<<"$out"
+  check "--init-submodules is refused as git only"      bash -c "cd '$PM' && bash '$UWT' new x --init-submodules >/dev/null 2>&1; [ \$? = 2 ]"
+
+  # --verify: change a golden file behind matching stat data. Plain new trusts
+  # the stat data, as cm does; --verify hashes and rolls back.
+  f="$PGD/Assets/Scenes/A.unity"; m0="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f")"
+  printf 'SCENE\n' > "$f"; touch -d "@$m0" "$f" 2>/dev/null || touch -t "$(date -r "$m0" +%Y%m%d%H%M.%S)" "$f"
+  out="$(uwt new /main/v1 --verify --path "$ROOT/uwtp-v1" --json 2>/dev/null)"; rc=$?
+  check "--verify catches content changed behind matching stat data (exit 2)" [ $rc = 2 ]
+  check "and rolls back: no directory, no registration, no branch" \
+        bash -c "[ ! -e '$ROOT/uwtp-v1' ] && ! MSYS_NO_PATHCONV=1 cm ls / --tree='br:/main/v1@$PR' >/dev/null 2>&1"
+  ! registered "$ROOT/uwtp-v1" && pass "and cm does not list it" || fail "and cm does not list it"
+  uwt seed "$PM" --force >/dev/null 2>&1
+  out="$(uwt new /main/v2 --verify --path "$ROOT/uwtp-v2" --json 2>/dev/null)"; rc=$?
+  check "--verify on a sound golden passes"             json_is 'd["value"]["verified"] is True' <<<"$out"
+  # EOL conversion rewrites text on disk: the server's hashes cannot verify it.
+  printf '.txt auto\n' > "$PM/eolconversion.conf"
+  out="$(uwt new /main/v3 --verify --path "$ROOT/uwtp-v3" 2>&1)"; rc=$?
+  check "--verify refuses under eolconversion.conf, before creating anything" bash -c "[ $rc = 2 ] && [ ! -e '$ROOT/uwtp-v3' ]"
+  check "and names the file"                            grep -q 'eolconversion.conf' <<<"$out"
+  rm -f "$PM/eolconversion.conf"
+
+  # A workspace made by hand finds the golden through the repo's workspaces.
+  pcm workspace create uwtp-hand "$(pwp "$ROOT/uwtp-hand")" "$PR" >/dev/null 2>&1
+  pcm update "$(pwp "$ROOT/uwtp-hand")" >/dev/null 2>&1
+  out="$(uwt hydrate "$ROOT/uwtp-hand" 2>&1)"; rc=$?
+  check "hydrate in a hand-made workspace finds the golden" bash -c "[ $rc = 0 ] && [ -s '$ROOT/uwtp-hand/Library/ArtifactDB' ]"
+
+  out="$(cd "$PT1" && uwt list --json 2>/dev/null)"; rc=$?
+  check "list --json from a created workspace exits 0"  [ $rc = 0 ]
+  check "it shows main first and every workspace of the repo" \
+        json_is 'd["value"][0]["main"] and len(d["value"]) == 7 and any(w["branch"] == "/main/task1" and w["library"] == "uwt" for w in d["value"])' <<<"$out"
+
+  out="$(uwt measure --json 2>/dev/null)"; rc=$?
+  check "measure covers the workspaces and the golden"  json_is 'any(t["name"]=="golden" for t in d["value"]["trees"]) and len(d["value"]["trees"]) == 8' <<<"$out"
+
+  # The same repository under another server spec is the same repository. The
+  # local server also answers as localhost:8084, where it is set up that way.
+  if [ "$PS" = local ] && [ "$(pcm repository list localhost:8084 --format='{repguid}' 2>/dev/null | tr -d '\r' | sort)" = "$(pcm repository list local --format='{repguid}' 2>/dev/null | tr -d '\r' | sort)" ]; then
+    pcm workspace create uwtp-alias "$(pwp "$ROOT/uwtp-alias")" "${PR%@*}@localhost:8084" >/dev/null 2>&1
+    out="$(cd "$PM" && uwt list --json 2>/dev/null)"
+    check "list counts a workspace that names the server differently" json_is 'len(d["value"]) == 8' <<<"$out"
+    pcm workspace delete "$(pwp "$ROOT/uwtp-alias")" >/dev/null 2>&1; rm -rf "$ROOT/uwtp-alias"
+  else
+    skip "server alias (needs the local server reachable as localhost:8084)"
+  fi
+
+  uwt remove "$PM" >/dev/null 2>&1; rc=$?
+  check "remove refuses the main workspace (exit 2)"    bash -c "[ $rc = 2 ] && [ -d '$PM/.plastic' ]"
+  echo p > "$ROOT/uwtp-feat/private.txt"
+  uwt remove "$ROOT/uwtp-feat" >/dev/null 2>&1; rc=$?
+  check "remove refuses a private file without --force" bash -c "[ $rc = 2 ] && [ -d '$ROOT/uwtp-feat' ]"
+  pcm checkout "$(pwp "$PT1/Assets/Scenes/A.unity")" >/dev/null 2>&1
+  uwt remove "$PT1" >/dev/null 2>&1; rc=$?
+  check "remove refuses a checkout without --force"     bash -c "[ $rc = 2 ] && [ -d '$PT1' ]"
+  out="$(uwt remove "$PT1" --force --json 2>/dev/null)"; rc=$?
+  check "remove --force undoes the checkout and removes" bash -c "[ $rc = 0 ] && [ ! -e '$PT1' ]"
+  ! registered "$PT1" && pass "the workspace is unregistered" || fail "the workspace is unregistered"
+  check "the branch is kept"                            pbranch /main/task1
+  check "remove --json names the branch"                json_is 'd["value"]["branch"] == "/main/task1" and d["value"]["branch_deleted"] is False' <<<"$out"
+  # --delete-branch: only a branch with no changesets that no other workspace is on.
+  uwt new /main/del1 --path "$ROOT/uwtp-del1" >/dev/null 2>&1
+  out="$(uwt remove "$ROOT/uwtp-del1" --delete-branch --json 2>/dev/null)"; rc=$?
+  check "remove --delete-branch deletes a branch with no changesets" bash -c "[ $rc = 0 ] && ! MSYS_NO_PATHCONV=1 cm ls / --tree='br:/main/del1@$PR' >/dev/null 2>&1"
+  check "and says so in --json"                         json_is 'd["value"]["branch_deleted"] is True' <<<"$out"
+  out="$(uwt remove "$ROOT/uwtp-feat" --force --delete-branch 2>&1)"; rc=$?
+  check "it keeps a branch with changesets, and still removes" bash -c "[ $rc = 0 ] && [ ! -e '$ROOT/uwtp-feat' ]"
+  check "the branch with changesets is still there"     pbranch /main/feat
+  check "and says why"                                  grep -q 'changeset' <<<"$out"
+  uwt new /main/shared --path "$ROOT/uwtp-sh1" >/dev/null 2>&1; uwt new /main/shared --path "$ROOT/uwtp-sh2" >/dev/null 2>&1
+  out="$(uwt remove "$ROOT/uwtp-sh1" --delete-branch 2>&1)"; rc=$?
+  check "it keeps a branch another workspace is on"     bash -c "[ $rc = 0 ] && [ ! -e '$ROOT/uwtp-sh1' ] && [ -d '$ROOT/uwtp-sh2' ]"
+  check "the shared branch is still there"              pbranch /main/shared
+  check "and says which workspace"                      grep -q 'uwtp-sh2' <<<"$out"
+  check "the main workspace is untouched"               bash -c "[ -d '$PM/.plastic' ] && [ \"$(pstat "$PM")\" = 0 ]"
+
+  # A partial (Gluon) workspace: its wktree describes a subset.
+  pcm workspace create uwtp-part "$(pwp "$ROOT/uwtp-part")" "$PR" >/dev/null 2>&1
+  (cd "$ROOT/uwtp-part" && pcm partial configure +/ProjectSettings +/Assets >/dev/null 2>&1 \
+     && mkdir -p Library && head -c 1000 /dev/urandom > Library/ArtifactDB)
+  out="$(uwt seed "$ROOT/uwtp-part" 2>&1)"; rc=$?
+  check "seed refuses a partial (Gluon) workspace"      [ $rc = 2 ]
+  check "and says it is partial"                        grep -q 'partial' <<<"$out"
+
+  # A project in a subdirectory of its workspace: the golden is that
+  # directory, and cm writes what lies outside it.
+  PR2="${PP}uwt-test-$$-sub@$PS"; PS2="$ROOT/uwtp-mono"
+  pcm repository create "$PR2" >/dev/null 2>&1
+  pcm workspace create uwtp-mono "$(pwp "$PS2")" "$PR2" >/dev/null 2>&1
+  (
+    cd "$PS2" || exit 1
+    mkdir -p game/ProjectSettings game/Assets tools
+    printf 'm_EditorVersion: 6000.7.0b1\n' > game/ProjectSettings/ProjectVersion.txt
+    echo a > game/Assets/a.txt; echo root > README.md; echo t > tools/t.txt
+    printf '/game/Library\n' > ignore.conf
+    pcm checkin --all --private -c init >/dev/null 2>&1
+    mkdir -p game/Library && head -c 1000 /dev/urandom > game/Library/ArtifactDB
+  )
+  out="$(uwt seed "$PS2/game" 2>&1)"; rc=$?
+  check "seed of a project in a subdirectory records the prefix" bash -c "[ $rc = 0 ] && grep -qx 'prefix=game' '$PS2/.plastic/uwt/golden.txt'"
+  out="$(cd "$PS2/game" && uwt new sub1 --path "$ROOT/uwtp-mono-sub1" 2>&1)"; rc=$?
+  check "new clones it back to the same offset"         bash -c "[ $rc = 0 ] && [ -f '$ROOT/uwtp-mono-sub1/game/Assets/a.txt' ] && [ -s '$ROOT/uwtp-mono-sub1/game/Library/ArtifactDB' ]"
+  check "and cm writes the files outside it"            exists "$ROOT/uwtp-mono-sub1/README.md" "$ROOT/uwtp-mono-sub1/tools/t.txt"
+  check "with a clean status"                           [ "$(pstat "$ROOT/uwtp-mono-sub1")" = 0 ]
+  # Its main workspace, and the golden with it, deleted by hand.
+  pcm workspace delete "$(pwp "$PS2")" >/dev/null 2>&1; rm -rf "$PS2"
+  uwt remove "$ROOT/uwtp-mono-sub1" >/dev/null 2>&1; rc=$?
+  check "remove takes a workspace whose main is gone"   bash -c "[ $rc = 0 ] && [ ! -e '$ROOT/uwtp-mono-sub1' ]"
+
+  cd "$ROOT"; pl_sweep
 fi
 
 # ------------------------------------------------------------------ done
