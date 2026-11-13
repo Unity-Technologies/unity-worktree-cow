@@ -13,7 +13,7 @@
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-UWT="$HERE/../.claude/skills/unity-worktree-cow/scripts/unity-worktree-cow.sh"
+UWT="$HERE/../skills/unity-worktree-cow/scripts/unity-worktree-cow.sh"
 [ -f "$UWT" ] || { echo "missing $UWT"; exit 2; }
 
 ROOT="${1:-$(mktemp -d "${TMPDIR:-/tmp}/uwt-tests-XXXXXX")}"

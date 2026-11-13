@@ -1,7 +1,9 @@
 # unity-worktree-cow
 
-A Claude Code skill, unity-worktree-cow (`uwt` for short), for running many
-concurrent Unity git worktrees without paying full disk for each one.
+An [Agent Skill](https://agentskills.io), unity-worktree-cow (`uwt` for short),
+for running many concurrent Unity git worktrees without paying full disk for
+each one. It works with any agent that reads `SKILL.md` skills (Claude Code,
+Codex, Copilot, Cursor, Gemini CLI, ...), and the script runs fine by hand.
 
 One golden snapshot of the project (working tree + `Library/`) is taken while
 the editor is closed. Every new worktree is a block-clone of that snapshot,
@@ -33,14 +35,39 @@ to fixed per project and the saving grows with project size. After the first
 open it grows slowly, except that on Unity 6.6+ a texture or model reimport
 can turn a whole `DataStore` segment private (0.1–0.5 GiB); see `SKILL.md`.
 
+## Install
+
+Copy `skills/unity-worktree-cow/` into the Unity project's repo, in the folder
+your agent reads skills from, and commit it: `uwt new` resets every worktree to
+its branch, so an uncommitted skill does not reach the worktrees it creates.
+
+| agent | folder in the repo |
+|---|---|
+| Codex, Cursor, Gemini CLI, GitHub Copilot | `.agents/skills/` |
+| Claude Code | `.claude/skills/` |
+| Copilot in VS Code | `.github/skills/` |
+
+Cursor and the Copilot coding agent also read `.claude/skills/`, so a repo
+used only with those and Claude Code needs just that one. A repo shared with
+Codex or Gemini as well needs both folders; keep the full skill in one and, in
+the other, a `SKILL.md` that repeats the frontmatter and points at the first, so
+there is only one script to update.
+
+`npx skills add Unity-Technologies/unity-worktree-cow` (the `skills` CLI) does the copy for most agents.
+
+An agent without skill support can be pointed at it from `AGENTS.md`:
+
+```markdown
+For Unity worktrees, or a worktree whose Library/ needs populating without a
+reimport, read .agents/skills/unity-worktree-cow/SKILL.md and use its script.
+```
+
 ## Use it
 
-Copy `.claude/skills/unity-worktree-cow/` into the target repo and commit it, so
-the worktrees it creates carry it too. Then, in a
-checkout whose `Library/` is imported and whose editor is **closed**:
+In a checkout whose `Library/` is imported and whose editor is **closed**:
 
 ```bash
-uwt=.claude/skills/unity-worktree-cow/scripts/unity-worktree-cow.sh
+uwt=<skill folder>/scripts/unity-worktree-cow.sh
 $uwt doctor                  # proves this volume block-clones; run first
 $uwt seed                    # snapshot project + Library into .git/uwt/golden
 $uwt new feature/x           # git worktree add + clone + hydrate, ~seconds
@@ -83,7 +110,7 @@ Windows, a `/proc` scan on Linux, `lsof` on macOS.
 
 ## Documentation
 
-`.claude/skills/unity-worktree-cow/SKILL.md` is the full reference: commands, what
+`skills/unity-worktree-cow/SKILL.md` is the full reference: commands, what
 is and is not cloned and why, the cost model, how to measure sharing, and
 troubleshooting.
 
