@@ -85,6 +85,14 @@ stamp(){ date -u +%Y-%m-%dT%H:%M:%SZ; }
 # ------------------------------------------------------------------ paths
 wpath() { if [ "$OS" = windows ]; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
 
+# The skill folder holding this script, wherever an agent installed it
+# (.claude/skills/, .agents/skills/, ...): the parent of scripts/.
+skill_dir() {
+  local d; d="$(dirname "$1")"
+  [ "$(basename "$d")" = scripts ] && d="$(dirname "$d")"
+  wpath "$d"
+}
+
 # Absolute path against the CALLER's directory, for a path that may not exist
 # yet (its parent must). Accepts C:\ style on Windows.
 abs_path() {
@@ -773,7 +781,7 @@ new_plastic() {
   say "  remove it later with: $(wpath "$self") remove $(wpath "$path")"
   case "$self" in
     "$m"/*) [ -n "$(cm_ ls "$(wpath "$self")" --format='{hash}' 2>/dev/null | tr -d '\r[:space:]')" ] \
-              || warn "the uwt skill is not checked in, so the new workspace has no copy of it; check in .claude/skills/unity-worktree-cow/" ;;
+              || warn "the uwt skill is not checked in, so the new workspace has no copy of it; check in $(skill_dir "$self")" ;;
   esac
   local jpath="$path" jproj="$pdir"   # in git's form: E:/x on Windows
   [ "$OS" = windows ] && { self="$(cygpath -m "$self")"; jpath="$(cygpath -m "$path")"; jproj="$(cygpath -m "$pdir")"; }
@@ -937,7 +945,7 @@ cmd_new() {
   say ""; good "worktree ready in ${secs}s: $path"
   say "  remove it later with: $(wpath "$self") remove $(wpath "$path")"
   if [ "$(common_dir "$sd")" = "$(common_dir "$m")" ] && ! git -C "$sd" ls-files --error-unmatch "$(basename "$self")" >/dev/null 2>&1; then
-    warn "the uwt skill is not committed, so the new worktree has no copy of it; commit .claude/skills/unity-worktree-cow/"
+    warn "the uwt skill is not committed, so the new worktree has no copy of it; commit $(skill_dir "$self")"
   fi
   [ "$OS" = windows ] && self="$(cygpath -m "$self")"
   json_ok new "{\"path\":$(json_str "$reg"),\"uwt\":$(json_str "$self"),\"project\":$(json_str "$reg${pre:+/$pre}"),\"branch\":$(json_str "$branch"),\"head\":$(json_str "$(git -C "$path" rev-parse HEAD)"),\"seconds\":$secs,\"verified\":$([ "${OPT_VERIFY:-0}" = 1 ] && echo true || echo false),\"submodules_uninitialized\":$subs}"

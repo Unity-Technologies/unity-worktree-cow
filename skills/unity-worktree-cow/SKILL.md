@@ -74,7 +74,8 @@ assets.
 
 ## Quick start
 
-Commit `.claude/skills/unity-worktree-cow/` to the repo. `new` resets every
+Commit this skill folder to the repo, wherever the agent reads skills from
+(`.agents/skills/`, `.claude/skills/`, ...). `new` resets every
 worktree to its branch and cleans untracked files, so an uncommitted skill is
 not in the worktrees it creates, and agents working there cannot reach uwt
 (`new` warns, and its JSON carries the script's absolute path as `uwt`).
@@ -82,14 +83,14 @@ not in the worktrees it creates, and agents working there cannot reach uwt
 In a checkout whose `Library/` is imported and whose editor is **closed**:
 
 ```bash
-uwt=.claude/skills/unity-worktree-cow/scripts/unity-worktree-cow.sh   # Git Bash on Windows
+uwt=<skill folder>/scripts/unity-worktree-cow.sh   # Git Bash on Windows
 $uwt doctor                  # ALWAYS first: a live clone probe, not a capability flag
 $uwt seed                    # snapshot project + Library into .git/uwt/golden
 $uwt new feature/my-thing    # git worktree add + clone + hydrate
 ```
 
-Hydrating a worktree created some other way (including Claude Code's own
-`isolation: worktree`):
+Hydrating a worktree created some other way (by hand, or by an agent's own
+worktree isolation, such as Claude Code's `isolation: worktree`):
 
 ```bash
 $uwt hydrate path/to/that/worktree
