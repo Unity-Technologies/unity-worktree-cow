@@ -69,16 +69,18 @@ fail() { printf '  %sx%s %s\n' "$CR" "$C0" "$*"; }
 die()  { fail "$*"; json_fail $EXIT_FAIL "$*"; exit $EXIT_FAIL; }
 refuse(){ fail "$*"; json_fail $EXIT_REFUSED "$*"; exit $EXIT_REFUSED; }
 
-# --json (list, new, remove): the human output above moves to stderr and fd 3
-# carries exactly one JSON record, success or failure, for agent callers.
-JSON=0
+# --json (list, new, hydrate, remove, measure): the human output above moves to
+# stderr and fd 3 carries exactly one JSON record, success or failure, for
+# agent callers. REASON, set for the one call (REASON=x die ...), gives a
+# failure a name a script can branch on.
+JSON=0; REASON=""
 json_str() {
   local s="$1"
   s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/\\n}"; s="${s//$'\r'/\\r}"; s="${s//$'\t'/\\t}"
   printf '"%s"' "$s"
 }
 json_ok()   { [ "$JSON" = 1 ] && printf '{"status":"ok","command":"%s","value":%s}\n' "$1" "$2" >&3; return 0; }
-json_fail() { [ "$JSON" = 1 ] && printf '{"status":"error","exit":%s,"message":%s}\n' "$1" "$(json_str "$2")" >&3; return 0; }
+json_fail() { [ "$JSON" = 1 ] && printf '{"status":"error","exit":%s,%s"message":%s}\n' "$1" "${REASON:+\"reason\":\"$REASON\",}" "$(json_str "$2")" >&3; return 0; }
 now()  { date +%s; }
 stamp(){ date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -274,6 +276,45 @@ unity_version() {
 }
 golden_field() { grep -m1 "^$2=" "$1.txt" 2>/dev/null | cut -d= -f2-; }
 
+# The active build target a Library opens on, e.g. "Android"; nothing when it
+# cannot be read. It travels with the golden on purpose (no platform switch on
+# first open), so a golden seeded on one platform costs a switch in every
+# worktree that builds for another. Library/EditorUserBuildSettings.asset is a
+# binary serialized file whose layout moves between Unity versions, so this
+# anchors on the one stable landmark: the active and selected platform group
+# names, two strings in a row ("Standalone", "Android", ...). Before them sit
+# the two group ints, and before those the active target; since Unity 6 it is
+# the active target, a 16-byte platform GUID and the selected target. Anything
+# that does not fit that shape exactly prints nothing.
+build_target() { # build_target <Library>
+  local f="$1/EditorUserBuildSettings.asset"; [ -f "$f" ] || return 0
+  od -An -v -tu1 "$f" 2>/dev/null | awk '
+    { for (i = 1; i <= NF; i++) b[n++] = $i + 0 }
+    function le(o) { return b[o] + 256 * (b[o+1] + 256 * (b[o+2] + 256 * b[o+3])) }
+    function be(o) { return b[o+3] + 256 * (b[o+2] + 256 * (b[o+1] + 256 * b[o])) }
+    # A length-prefixed name of letters, digits and spaces at o: its padded size, else 0.
+    function name(o,   l, j, c) {
+      if (o + 4 > n) return 0
+      l = le(o); if (l < 2 || l > 40 || o + 4 + l > n) return 0
+      for (j = 0; j < l; j++) { c = b[o+4+j]; if (!(c == 32 || (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122))) return 0 }
+      return 4 + l + (4 - l % 4) % 4
+    }
+    END {
+      if (n < 64 || be(8) < 22) exit            # format 22+: Unity 2020.1 and later
+      split("2 macOS 5 Windows32 9 iOS 13 Android 19 Windows 20 WebGL 21 UWP 24 Linux 25 XboxOne 31 PS4 37 tvOS 38 Switch 41 LinuxHeadlessSimulation 42 XboxSeries 43 GameCoreXboxOne 44 PS5 45 EmbeddedLinux 46 QNX 47 visionOS 48 Switch2", m, " ")
+      for (i = 1; i in m; i += 2) T[m[i]] = m[i+1]
+      for (i = 48; b[i] >= 48 && b[i] <= 57; i++) major = major * 10 + b[i] - 48   # "6000.4.0f1"
+      for (p = be(36) + 20; p + 8 < n; p += 4) {
+        s = name(p); if (!s || !name(p + s)) continue
+        if (le(p - 4) > 63 || le(p - 8) > 63 || !(le(p - 12) in T)) exit
+        t = le(major >= 6000 ? p - 32 : p - 12); if (t in T) print T[t]
+        exit
+      }
+    }'
+}
+# A path in git's form for --json: E:/x on Windows.
+jpath() { if [ "$OS" = windows ]; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+
 fs_type() {
   case "$OS" in
     windows) df -T "$1" 2>/dev/null | awk 'NR==2{print $2}' ;;   # Git Bash df knows refs/ntfs; fsutil needs admin
@@ -374,7 +415,14 @@ cow_probe() { # cow_probe <dir>
   head -c 8388608 /dev/urandom > "$p/a.bin" 2>/dev/null   # 8 MiB, incompressible
   local rc=1 why
   case "$OS" in
-    darwin)  if cp -c "$p/a.bin" "$p/b.bin" 2>/dev/null; then rc=0; why="APFS clonefile"; else why="cp -c rejected: not APFS"; fi ;;
+    # cp -c succeeding proves nothing: off APFS it falls back to a byte copy.
+    # Only APFS clones on macOS, so the volume type is the gate; cow_tree's
+    # cp -Rpc relies on every caller having probed the destination first.
+    darwin)  local t; t="$(fs_type "$d")"
+             case "$t" in
+               apfs|APFS) if cp -c "$p/a.bin" "$p/b.bin" 2>/dev/null; then rc=0; why="APFS clonefile"; else why="cp -c failed on APFS"; fi ;;
+               *)         why="volume is ${t:-of unknown type}, not APFS (cp -c would copy bytes there, not clone)" ;;
+             esac ;;
     linux)   if cp --reflink=always "$p/a.bin" "$p/b.bin" 2>/dev/null; then rc=0; why="reflink ($(fs_type "$d"))"
              else why="reflink rejected by $(fs_type "$d") (ext4 cannot; XFS needs reflink=1)"; fi ;;
     windows) mkdir -p "$p/b"
@@ -453,7 +501,7 @@ require_editor_closed() { # require_editor_closed <project> <verb>
     fail "refusing to $2: a Unity Editor or Data Store is using $1"
     printf '%s\n' "$reasons"
     warn "Save and close the editor, then re-run. uwt never closes it for you."
-    json_fail $EXIT_REFUSED "refusing to $2: a Unity Editor or Data Store is using $1"
+    REASON=editor_busy json_fail $EXIT_REFUSED "refusing to $2: a Unity Editor or Data Store is using $1"
     exit $EXIT_REFUSED
   fi
 }
@@ -500,7 +548,7 @@ cmd_doctor() {
   say ""; head_ "golden"
   if golden_ok "$gd"; then
     say "  $gd"
-    say "  unity=$(golden_field "$gd" unity_version)  commit=$(golden_field "$gd" commit | cut -c1-10)  created=$(golden_field "$gd" created)  files=$(golden_field "$gd" files)"
+    say "  unity=$(golden_field "$gd" unity_version)  commit=$(golden_field "$gd" commit | cut -c1-10)  created=$(golden_field "$gd" created)  files=$(golden_field "$gd" files)  build_target=$(build_target "$gd/Library")"
     [ "$(golden_field "$gd" unity_version)" = "$(unity_version "$proj")" ] || warn "golden was captured under a different editor version than this checkout declares; re-seed after upgrades"
   else say "  none yet - run: uwt seed   (with the editor closed)"; fi
   say ""; head_ "not offered, on purpose"
@@ -539,10 +587,10 @@ cmd_seed() {
     [ -z "$pend" ] || { printf '%s\n' "$pend" | head -5 | sed 's/^/    /'
                         die "$(printf '%s\n' "$pend" | wc -l | tr -d ' ') pending change(s) here (checkouts, adds, moves, deletes or a merge); check them in, shelve or undo them, then seed"; }
     local dirty; dirty="$(pl_local "$proj" | wc -l | tr -d ' ')"
-    [ "$dirty" = 0 ] || warn "$dirty local change(s) here (edited, deleted or moved without a checkout, hidden ones included); workspaces are reset to their branch, so these do not carry over"
+    [ "$dirty" = 0 ] || warn "$dirty local change(s) here (edited, deleted or moved without a checkout, hidden ones included); workspaces are reset to their branch, so these do not carry over, and the Library was imported from them, so each workspace reimports those assets on first open"
   else
     local dirty; dirty="$(git -C "$proj" status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d ' ')"
-    [ "$dirty" = 0 ] || warn "$dirty uncommitted tracked change(s) here; worktrees are reset to their branch, so these do not carry over (ProjectVersion.txt bumps included)"
+    [ "$dirty" = 0 ] || warn "$dirty uncommitted tracked change(s) here; worktrees are reset to their branch, so these do not carry over (ProjectVersion.txt bumps included), and the Library was imported from them, so each worktree reimports those assets on first open"
     local flagged; flagged="$(git -C "$proj" ls-files -v 2>/dev/null | grep -c '^[a-zS] ')"
     [ "$flagged" = 0 ] || warn "$flagged file(s) marked assume-unchanged or skip-worktree; worktrees get the committed version of them, not your local one"
   fi
@@ -597,38 +645,67 @@ cmd_seed() {
   [ $ok = 1 ] && mv "$stage.txt" "$gd.txt" || ok=0
   [ $ok = 1 ] || { rm -rf "$stage" "$stage".* "$gd" "$gd".*; die "could not publish $gd"; }
   good "golden published in $(( $(now) - t0 ))s: $(golden_field "$gd" files) files, unity $(golden_field "$gd" unity_version), commit $(golden_field "$gd" commit | cut -c1-10)"
+  local bt; bt="$(build_target "$gd/Library")"
+  [ -z "$bt" ] || say "  build target: $bt. Worktrees open on it; one that builds for another platform pays a platform switch, so seed from the platform you build for."
   say "  re-run 'uwt seed --force' after an editor upgrade or when the snapshot feels stale (it is cheap)."
   exit $EXIT_OK
 }
 
 # ------------------------------------------------------------------ hydrate
-hydrate_library() { # hydrate_library <golden> <worktree>
-  local gd="$1" wt="$2" t0; t0=$(now)
-  cow_tree "$gd/Library" "$wt/Library" || { rm -rf "$wt/Library"; return 1; }
-  strip_never "$wt/Library"
+hydrate_library() { # hydrate_library <golden> <worktree> [<library-dir>]
+  local gd="$1" wt="$2" lib="${3:-$2/Library}" t0; t0=$(now)
+  cow_tree "$gd/Library" "$lib" || { rm -rf "$lib"; return 1; }
+  strip_never "$lib"
   local gv wv; gv="$(golden_field "$gd" unity_version)"; wv="$(unity_version "$wt")"
   [ "$gv" = "$wv" ] || warn "golden Library is from Unity '$gv', this worktree declares '$wv'; the editor will upgrade or reimport on first open (expect extra private disk). Re-seed under the new version to avoid it."
   { echo "golden_commit=$(golden_field "$gd" commit)"; echo "golden_created=$(golden_field "$gd" created)"
-    echo "golden_unity=$gv"; echo "hydrated=$(stamp)"; } > "$wt/Library/.uwt-hydration.txt"
-  good "Library hydrated in $(( $(now) - t0 ))s ($(file_count "$wt/Library") files)"
+    echo "golden_unity=$gv"; echo "hydrated=$(stamp)"; } > "$lib/.uwt-hydration.txt"
+  good "Library hydrated in $(( $(now) - t0 ))s ($(file_count "$lib") files)"
+  local bt; bt="$(build_target "$lib")"
+  [ -z "$bt" ] || say "    build target: $bt (the golden's); building for another platform switches and reimports"
+}
+
+# The end of every hydrate that leaves a Library in place. <action> is
+# "hydrated" or "kept"; library says who made what is there, as `list` does.
+hydrate_done() { # hydrate_done <worktree> <action> <t0>
+  local wt="$1" from=other bt; [ -f "$wt/Library/.uwt-hydration.txt" ] && from=uwt
+  bt="$(build_target "$wt/Library")"
+  if [ "$2" = kept ]; then
+    good "Library/ already exists ($([ $from = uwt ] && echo "hydrated by uwt" || echo "not from uwt")); left as it is. Pass --force to replace it from the golden."
+  fi
+  json_ok hydrate "{\"project\":$(json_str "$(jpath "$wt")"),\"action\":\"$2\",\"library\":\"$from\",\"build_target\":$(json_str "$bt"),\"seconds\":$(( $(now) - $3 ))}"
+  exit $EXIT_OK
 }
 
 cmd_hydrate() {
   local wt; wt="$(project_root "${1:-$PWD}")" || exit $EXIT_FAIL
   local gd; gd="$(golden_dir "$wt")"
+  local lib="$wt/Library" new="$wt/Library.uwt-new" old="$wt/Library.uwt-old" t0; t0=$(now)
   say ""; head_ "uwt hydrate"; say "worktree $wt"
-  golden_ok "$gd" || die "no golden for this repo - run 'uwt seed' in a checkout with an imported Library"
+  # Idempotent, so a setup script can run it every time: a Library that is
+  # already there is left alone, whoever made it and whatever else is missing.
+  [ ! -d "$lib" ] || [ "${OPT_FORCE:-0}" = 1 ] || hydrate_done "$wt" kept "$t0"
+  golden_ok "$gd" || REASON=no_golden die "no golden for this repo - run 'uwt seed' in a checkout with an imported Library"
   local gpre wpre; gpre="$(golden_field "$gd" prefix)"; wpre="$(project_prefix "$wt")"
-  [ "$gpre" = "$wpre" ] || die "the golden is of the project at '${gpre:-<repo root>}', not '${wpre:-<repo root>}'"
+  [ "$gpre" = "$wpre" ] || REASON=other_project die "the golden is of the project at '${gpre:-<repo root>}', not '${wpre:-<repo root>}'"
   require_editor_closed "$wt" hydrate
-  if [ -d "$wt/Library" ]; then
-    [ "${OPT_FORCE:-0}" = 1 ] || die "Library/ already exists; pass --force to replace it"
-    rm -rf "$wt/Library" || die "could not remove the existing Library/"
+  # An existing Library is replaced by a staged swap, never deleted up front:
+  # it may be a full private import, and every check and the clone itself can
+  # still fail. A run interrupted mid-swap left it as Library.uwt-old.
+  if [ ! -e "$lib" ] && [ -d "$old" ]; then mv "$old" "$lib" || die "could not restore $old to Library/"; fi
+  rm -rf "$new" "$old" || die "could not clear a stale $new or $old"
+  [ ! -d "$lib" ] || [ "${OPT_FORCE:-0}" = 1 ] || hydrate_done "$wt" kept "$t0"
+  same_volume "$wt" "$gd" || REASON=different_volume die "worktree and golden are on different volumes; nothing would be shared"
+  local why; why="$(cow_probe "$wt")" || REASON=unsupported_volume die "this volume cannot block-clone ($why)"
+  if [ -d "$lib" ]; then
+    hydrate_library "$gd" "$wt" "$new" || die "hydrate failed; the existing Library/ is untouched"
+    mv "$lib" "$old" || { rm -rf "$new"; die "could not move the existing Library/ aside; it is untouched"; }
+    mv "$new" "$lib" || { mv "$old" "$lib"; rm -rf "$new"; die "could not put the new Library/ in place; the previous one is restored"; }
+    rm -rf "$old" || warn "the new Library/ is in place, but $old could not be deleted; delete it by hand"
+  else
+    hydrate_library "$gd" "$wt" || die "hydrate failed; Library/ removed"
   fi
-  same_volume "$wt" "$gd" || die "worktree and golden are on different volumes; nothing would be shared"
-  local why; why="$(cow_probe "$wt")" || die "this volume cannot block-clone ($why)"
-  hydrate_library "$gd" "$wt" || die "hydrate failed; Library/ removed"
-  exit $EXIT_OK
+  hydrate_done "$wt" hydrated "$t0"
 }
 
 # ------------------------------------------------------------------ new
@@ -810,7 +887,7 @@ cmd_new() {
   local path="${OPT_PATH:-$(dirname "$m")/$(basename "$m")-$(printf '%s' "${branch#/}" | tr -c 'A-Za-z0-9._-' '-')}"
   mkdir -p "$(dirname "$path")" 2>/dev/null; path="$(abs_path "$path")"
   say ""; head_ "uwt new"; say "repo     $m"; say "branch   $branch"; say "path     $path"
-  golden_ok "$gd" || die "no golden yet - run 'uwt seed' first (editor closed)"
+  golden_ok "$gd" || REASON=no_golden die "no golden yet - run 'uwt seed' first (editor closed)"
   [ -e "$path" ] && die "path already exists: $path"
 
   # MAX_PATH: the golden knows its longest relative path, so this is exact for
@@ -824,9 +901,9 @@ cmd_new() {
   fi
 
   # Everything that can refuse does so BEFORE git registers anything.
-  same_volume "$gd" "$(dirname "$path")" || die "the golden ($gd) and the new worktree must be on one volume; set UWT_CACHE_ROOT or choose another --path"
+  same_volume "$gd" "$(dirname "$path")" || REASON=different_volume die "the golden ($gd) and the new worktree must be on one volume; set UWT_CACHE_ROOT or choose another --path"
   local why; why="$(cow_probe "$(dirname "$path")")" \
-    || die "this volume cannot block-clone ($why); use plain $([ "$vcs" = plastic ] && echo "'cm workspace create'" || echo "'git worktree add'")"
+    || REASON=unsupported_volume die "this volume cannot block-clone ($why); use plain $([ "$vcs" = plastic ] && echo "'cm workspace create'" || echo "'git worktree add'")"
   [ "$vcs" = plastic ] && new_plastic
   local ref="${OPT_BASE:-HEAD}" exists=0
   git -C "$m" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null && { ref="refs/heads/$branch"; exists=1; }
@@ -1159,7 +1236,8 @@ uwt - cheap Unity git worktrees (or Plastic workspaces) via copy-on-write
   uwt new     BRANCH [--path DIR] [--base REF] [--inherit-untracked]
               [--init-submodules] [--verify] [--json]
                                           git worktree add + clone the snapshot + hydrate
-  uwt hydrate [PATH] [--force]            give an existing worktree a Library from the golden
+  uwt hydrate [PATH] [--force] [--json]   give an existing worktree a Library from the golden;
+                                          one that has a Library is left alone (exit 0)
   uwt list    [PATH] [--json]             the repo's worktrees and where each Library came from
   uwt remove  PATH [--force] [--delete-branch] [--json]
                                           git worktree remove, behind the editor interlock;
@@ -1173,7 +1251,9 @@ Plastic workspaces: BRANCH is a branch path (/main/task); a bare name is a
 Golden location: <repo>/.git/uwt/golden, <main workspace>/.plastic/uwt/golden,
   or \$UWT_CACHE_ROOT/golden.
 --json: human output goes to stderr; stdout carries one record,
-  {"status":"ok","command":...,"value":...} or {"status":"error","exit":N,"message":...}.
+  {"status":"ok","command":...,"value":...} or {"status":"error","exit":N,"message":...},
+  the latter with "reason" where there is one: no_golden, editor_busy,
+  unsupported_volume, different_volume, other_project.
 Exit codes: 0 ok, 2 failure, 3 refused (an editor is using the project).
 EOF
 }
@@ -1202,7 +1282,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 if [ "$OPT_JSON" = 1 ]; then
-  case "$CMD" in list|new|remove|measure) exec 3>&1 1>&2; JSON=1 ;; *) die "--json is supported by list, new, remove and measure" ;; esac
+  case "$CMD" in list|new|hydrate|remove|measure) exec 3>&1 1>&2; JSON=1 ;; *) die "--json is supported by list, new, hydrate, remove and measure" ;; esac
 fi
 case "$CMD" in
   doctor)  cmd_doctor  "${POS[@]:-}" ;;

@@ -42,7 +42,16 @@ that is the editors contending with each other, not the clone: on the 41k-file
 project one editor alone spends 39 s in `CompileScripts` and 7 s in
 `ImportOutOfDateAssets`, four at once 160–168 s and 17–41 s. Still much faster
 than a cold import, but budget minutes, not seconds, and stagger first opens
-when disk or CPU is tight.
+when disk or CPU is tight. As a range: 42–66 s for one editor alone on the
+test projects, up to ~7 minutes with four at once on the production one.
+
+The 0–6 figure assumes a golden seeded from a clean checkout. The Library is
+imported from the donor's working tree, so whatever the worktree does not
+share with it reimports on first open: uncommitted edits in the donor (`seed`
+warns about them), a branch that differs, changed packages. Seed from a clean
+checkout near the branches you will work on. `Search` is denied too, so the
+editor rebuilds its index in the background after the refresh; that is
+separate from the first-open times above.
 
 The first open is also where the private cost comes from. The largest item is
 usually `PackageCache`: Unity re-creates a fixed set of large package binaries
@@ -96,6 +105,25 @@ worktree isolation, such as Claude Code's `isolation: worktree`):
 $uwt hydrate path/to/that/worktree
 ```
 
+The two differ in what they share. `new` clones the whole snapshot, so source
+and art files share blocks with the golden as well as the Library. `hydrate`
+only adds the Library: the worktree's files are the ones its creator checked
+out, and cost their full size.
+
+`hydrate` is safe to run every time, which is what an agent's worktree setup
+script needs (Codex's, for one): a worktree that already has a `Library/` is
+left alone and the exit code is 0. With `--json` the script can tell the
+outcomes apart:
+
+| Outcome | Record |
+|---|---|
+| Library cloned from the golden | `ok`, `value.action` = `hydrated` |
+| A Library was already there | `ok`, `value.action` = `kept`; `value.library` is `uwt` or `other` |
+| No snapshot yet | `error`, exit 2, `reason` = `no_golden` |
+| Editor has the project open | `error`, exit 3, `reason` = `editor_busy` |
+| Volume cannot clone | `error`, exit 2, `reason` = `unsupported_volume` |
+| Worktree and golden on different volumes | `error`, exit 2, `reason` = `different_volume` |
+
 ## Commands
 
 | command | what it does |
@@ -103,7 +131,7 @@ $uwt hydrate path/to/that/worktree
 | `doctor [PATH]` | Proves this volume block-clones by doing one and reading the refcount back. Checks the golden and cache root are on the project's volume, which open-file check the interlock will use, whether an editor is live, and the golden's state. Warns on Windows when long paths are off. |
 | `seed [PATH] [--force]` | Snapshots the working tree and `Library/` (minus the deny list) plus the git index. Refuses while an editor or Data Store has the project open. Cheap; re-run after editor upgrades. |
 | `new BRANCH [--path DIR] [--base REF] [--inherit-untracked] [--init-submodules] [--verify] [--json]` | `git worktree add --no-checkout`, clone the snapshot, hand git the snapshot's index, `reset --hard` to the branch, verify zero tracked differences, clean inherited untracked files, hydrate `Library/`. Refuses before registering anything if the volume cannot clone, or if it folds case and the branch has paths that collide by case. Rolls back on failure. |
-| `hydrate [PATH] [--force]` | Gives an existing worktree a `Library/` cloned from the golden. |
+| `hydrate [PATH] [--force] [--json]` | Gives an existing worktree a `Library/` cloned from the golden. One that already has a `Library/` is left alone (exit 0); `--force` replaces it, and keeps the old one until the new one is in place. |
 | `list [PATH] [--json]` | Every worktree of the repo, including ones uwt did not create, with its branch, lock state, and whether its `Library/` came from uwt (`uwt`), from an editor (`other`), or is absent (`none`). |
 | `measure [PATH...] [--by N] [--json]` | Private disk of each worktree and the golden against all the others, by physical-block overlap, with the largest private groups. Read-only. See "Measuring it yourself". |
 | `remove PATH [--force] [--delete-branch] [--json]` | `git worktree remove` behind the editor interlock. A dirty worktree needs `--force`; a locked one needs `git worktree unlock` first. The branch is kept, or with `--delete-branch` deleted as `git branch -d` would, only when it holds no work of its own. Refuses the main worktree. |
@@ -117,10 +145,14 @@ different volume from the repo (the golden must be on the worktrees' volume).
 
 Exit codes: `0` ok · `2` failure · `3` refused by the editor interlock.
 
-For agents, `list`, `new`, `remove` and `measure` take `--json`: the human output moves to
+For agents, `list`, `new`, `hydrate`, `remove` and `measure` take `--json`: the human output moves to
 stderr and stdout carries exactly one record, either
 `{"status":"ok","command":"new","value":{...}}` or
-`{"status":"error","exit":2,"message":"..."}`. `new`'s value has `path`,
+`{"status":"error","exit":2,"reason":"no_golden","message":"..."}`. `reason`
+is there when the failure is one a script can act on: `no_golden`,
+`editor_busy`, `unsupported_volume`, `different_volume`, `other_project`.
+`hydrate`'s value has `project`, `action`, `library`, `build_target` and
+`seconds`. `new`'s value has `path`,
 `project`, `uwt` (this script's absolute path), `branch`, `head`, `seconds`,
 `verified` and `submodules_uninitialized`; `remove`'s has `path`, `branch` and
 `branch_deleted`.
@@ -213,9 +245,16 @@ retry. **uwt never closes the editor for you**: `unity close` exits without
 saving.
 
 **Worktrees are reset to their branch.** Uncommitted edits in the checkout you
-seeded from do not carry over. That includes `ProjectSettings/ProjectVersion.txt`:
+seeded from do not carry over, and because the Library was imported from them,
+each worktree reimports those assets on first open. That includes `ProjectSettings/ProjectVersion.txt`:
 if the running editor is newer than the committed version, commit the bump
 before seeding, or every worktree declares the old version and hydrate warns.
+
+**Seed on the platform you build for.** The golden carries the active build
+target, so every worktree opens on it. That saves a platform switch when the
+target is the one you build, and costs one in every worktree when it is not
+(a golden left on Android, worktrees building for macOS). `seed`, `hydrate`
+and `doctor` print the golden's build target.
 
 **Re-seed after an editor upgrade.** A Library from another editor version is
 usable (Unity upgrades or reimports it, exactly as when a single checkout
