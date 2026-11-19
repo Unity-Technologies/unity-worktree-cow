@@ -58,7 +58,9 @@ shares_blocks() {
 PROJ="$ROOT/proj"
 rm -rf "$ROOT"/proj "$ROOT"/proj-* "$ROOT"/wt-* "$ROOT"/plain
 mkdir -p "$PROJ" && cd "$PROJ" || exit 2
-git init -q && git config user.email t@t && git config user.name t && git config core.autocrlf false
+# The branch is named, never left to init.defaultBranch: the groups below return to it by name.
+git init -q -b main && git config user.email t@t && git config user.name t && git config core.autocrlf false \
+  || { echo "fixture: git init failed"; exit 2; }
 mkdir -p ProjectSettings Assets/Scenes Packages Library/PackageCache/com.x@abc Library/DataStore/00 \
          Library/Bee Library/BurstCache Library/ScriptAssemblies Library/Search Library/Pipeline Library/ShaderCache Temp obj
 printf 'm_EditorVersion: 6000.7.0b1\nm_EditorVersionWithRevision: 6000.7.0b1 (deadbeef)\n' > ProjectSettings/ProjectVersion.txt
@@ -71,10 +73,15 @@ head -c 100000 /dev/urandom > Library/DataStore/UDSData_3.bin
 echo pkg > Library/PackageCache/com.x@abc/package.json
 echo dag > Library/Bee/x.dag; echo burst > Library/BurstCache/b.dll; echo dll > Library/ScriptAssemblies/a.dll
 echo idx > Library/Search/i.index; echo pipe > Library/Pipeline/p; echo sc > Library/ShaderCache/s.bin
+# The smallest EditorUserBuildSettings.asset uwt reads the build target from:
+# format 22, data at 64, a Unity 6 version string; then the active target
+# (13, Android), a platform GUID, the selected target, both groups and names.
+{ printf '\0\0\0\0\0\0\0\0\0\0\0\026'; head -c 20 /dev/zero; printf '\0\0\0\0\0\0\0\100\0\0\0\0\0\0\0\0'
+  printf '6000.7.0b1\0\0\0\0\0\0'; printf '\0\0\0\0\0\0\0\0\015\0\0\0'; head -c 16 /dev/zero
+  printf '\015\0\0\0\007\0\0\0\007\0\0\0\007\0\0\0Android\0\007\0\0\0Android\0\0\0\0\0'; } > Library/EditorUserBuildSettings.asset
 echo '{"process_id":999999}' > Library/EditorInstance.json; : > Library/ArtifactDB-lock; echo 123 > Library/burst.pid
 : > Temp/UnityLockfile; echo x > Foo.csproj
-git add -A && git commit -qm init
-git branch keep HEAD
+git add -A && git commit -qm init && git branch keep HEAD || { echo "fixture: initial commit failed"; exit 2; }
 echo untracked > scratch.txt      # untracked, not ignored: must not survive `new`
 
 # Can this ROOT clone? Decide once, from the tool's own probe.
@@ -101,6 +108,7 @@ GD="$PROJ/.git/uwt/golden"
 out="$(uwt seed "$PROJ" 2>&1)"; rc=$?
 if [ $CLONES = 1 ]; then
   check "seed exits 0"                                   [ $rc = 0 ]
+  check "seed names the build target worktrees open on"  grep -q 'build target: Android' <<<"$out"
   check "golden.txt, golden.index and golden/Library exist" exists "$GD.txt" "$GD.index" "$GD/Library"
   check "golden records the Unity version"               grep -q '^unity_version=6000.7.0b1' "$GD.txt"
   check "golden records HEAD"                            grep -q "^commit=$(git rev-parse HEAD)" "$GD.txt"
@@ -197,8 +205,9 @@ if [ $CLONES = 1 ]; then
   else
     skip "MAX_PATH warning (Windows with LongPathsEnabled=0 only)"
   fi
-  # Cross-branch: the snapshot is at master; the target branch differs.
-  git -C "$PROJ" checkout -q -b other && echo changed > README.md && echo new > Assets/N.txt && git rm -q Packages/manifest.json && git add -A && git commit -qm other && git checkout -q master
+  # Cross-branch: the snapshot is at main; the target branch differs.
+  git -C "$PROJ" checkout -q -b other && echo changed > README.md && echo new > Assets/N.txt && git rm -q Packages/manifest.json && git add -A && git commit -qm other && git checkout -q main \
+    || fail "cross-branch fixture setup"
   check "cross-branch: reset reconciles to the target branch exactly" \
         bash -c "cd '$PROJ' && bash '$UWT' new other --path '$ROOT/wt-other' >/dev/null 2>&1 && [ \"\$(cat '$ROOT/wt-other/README.md')\" = changed ] && [ -f '$ROOT/wt-other/Assets/N.txt' ] && [ ! -e '$ROOT/wt-other/Packages/manifest.json' ] && [ -z \"\$(git -C '$ROOT/wt-other' status --porcelain)\" ]"
   # Local edits hidden behind index bits: git status cannot see them, so only
@@ -227,11 +236,48 @@ group "5. hydrate"
 git -C "$PROJ" worktree add -q "$ROOT/plain" -b plain
 if [ $CLONES = 1 ]; then
   check "hydrate fills a plain git worktree"          bash -c "bash '$UWT' hydrate '$ROOT/plain' >/dev/null 2>&1 && [ -s '$ROOT/plain/Library/ArtifactDB' ]"
-  check "hydrate refuses to overwrite without --force" bash -c "bash '$UWT' hydrate '$ROOT/plain' >/dev/null 2>&1; [ \$? = 2 ]"
+  out="$(uwt hydrate "$ROOT/plain" --force --json 2>/dev/null)"; rc=$?
+  check "hydrate --json is one ok record"              bash -c "[ $rc = 0 ] && [ \$(wc -l <<<'$out') = 1 ]"
+  check "that says hydrated, from uwt, and the build target" \
+        json_is "d['status']=='ok' and d['command']=='hydrate' and d['value']['action']=='hydrated' and d['value']['library']=='uwt' and d['value']['build_target']=='Android'" <<<"$out"
+  # Idempotent: a setup script runs it every time.
+  echo keep > "$ROOT/plain/Library/KEEP"
+  out="$(uwt hydrate "$ROOT/plain" --json 2>/dev/null)"; rc=$?
+  check "hydrate on a worktree that has a Library exits 0" [ $rc = 0 ]
+  check "and reports it kept"                         json_is "d['value']['action']=='kept' and d['value']['library']=='uwt'" <<<"$out"
+  check "and left it alone"                           exists "$ROOT/plain/Library/KEEP"
+  rm "$ROOT/plain/Library/.uwt-hydration.txt"
+  check "a Library uwt did not make is kept as 'other'" json_is "d['value']['action']=='kept' and d['value']['library']=='other'" <<<"$(uwt hydrate "$ROOT/plain" --json 2>/dev/null)"
   check "hydrate --force replaces"                    bash -c "echo junk > '$ROOT/plain/Library/JUNK'; bash '$UWT' hydrate '$ROOT/plain' --force >/dev/null 2>&1 && [ ! -e '$ROOT/plain/Library/JUNK' ]"
+  # A --force that cannot finish must leave the Library it was replacing. The
+  # failures are forced from PATH: a probe that finds no clone, then a clone
+  # that fails after the probe passed.
+  echo mine > "$ROOT/plain/Library/MINE"; cp "$ROOT/plain/Library/ArtifactDB" "$ROOT/plain-adb"
+  SH="$ROOT/shim"; rm -rf "$SH"; mkdir -p "$SH/probe" "$SH/clone"
+  if [ $WIN = 1 ]; then
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$SH/probe/fsutil"
+    printf '#!/usr/bin/env bash\ncase "$*" in *.uwt-probe*) exec "%s" "$@" ;; esac\nexit 16\n' "$(command -v robocopy)" > "$SH/clone/robocopy"
+  else
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$SH/probe/cp"
+    printf '#!/usr/bin/env bash\ncase "$*" in *.uwt-probe*) exec "%s" "$@" ;; esac\nexit 1\n' "$(command -v cp)" > "$SH/clone/cp"
+  fi
+  chmod +x "$SH"/*/*
+  for how in probe clone; do
+    PATH="$SH/$how:$PATH" uwt hydrate "$ROOT/plain" --force >/dev/null 2>&1; rc=$?
+    check "hydrate --force with a failing $how exits 2"   [ $rc = 2 ]
+    check "and leaves the existing Library byte-identical" bash -c "cmp -s '$ROOT/plain/Library/ArtifactDB' '$ROOT/plain-adb' && [ -f '$ROOT/plain/Library/MINE' ]"
+    check "and leaves no staging directory"              absent "$ROOT/plain/Library.uwt-new" "$ROOT/plain/Library.uwt-old"
+  done
+  out="$(PATH="$SH/probe:$PATH" uwt hydrate "$ROOT/plain" --force --json 2>/dev/null)"
+  check "a volume that cannot clone is reason unsupported_volume" json_is "d['status']=='error' and d['exit']==2 and d['reason']=='unsupported_volume'" <<<"$out"
+  mv "$ROOT/plain/Library" "$ROOT/plain/Library.uwt-old" && mkdir "$ROOT/plain/Library.uwt-new"
+  check "a Library an interrupted swap moved aside is restored" \
+        bash -c "bash '$UWT' hydrate '$ROOT/plain' >/dev/null 2>&1; [ \$? = 0 ] && [ -f '$ROOT/plain/Library/MINE' ] && [ ! -e '$ROOT/plain/Library.uwt-new' ] && [ ! -e '$ROOT/plain/Library.uwt-old' ]"
   check "hydrate warns on a Unity version mismatch"   bash -c "sed -i.bak 's/6000.7.0b1/6000.8.0a1/' '$ROOT/plain/ProjectSettings/ProjectVersion.txt'; bash '$UWT' hydrate '$ROOT/plain' --force 2>&1 | grep -q 'declares'"
 else
-  check "hydrate refuses with exit 2 when there is no golden" bash -c "bash '$UWT' hydrate '$ROOT/plain' >/dev/null 2>&1; [ \$? = 2 ]"
+  out="$(uwt hydrate "$ROOT/plain" --json 2>/dev/null)"; rc=$?
+  check "hydrate refuses with exit 2 when there is no golden" [ $rc = 2 ]
+  check "and --json gives the reason no_golden"       json_is "d['status']=='error' and d['reason']=='no_golden'" <<<"$out"
 fi
 
 # ------------------------------------------------------------------ 6. cli
@@ -698,6 +744,35 @@ else
   check "remove takes a workspace whose main is gone"   bash -c "[ $rc = 0 ] && [ ! -e '$ROOT/uwtp-mono-sub1' ]"
 
   cd "$ROOT"; pl_sweep
+fi
+
+# ------------------------------------------------------------------ 13. macOS, a volume that cannot clone
+group "13. macOS: a volume that cannot clone"
+# cp -c succeeds on FAT by copying bytes, so the probe must not take its word.
+FATM="$ROOT/fatmnt"
+if [ "$(uname -s)" = Darwin ] && command -v hdiutil >/dev/null 2>&1; then
+  hdiutil detach -quiet -force "$FATM" >/dev/null 2>&1; rm -rf "$ROOT/fat.dmg" "$FATM"; mkdir -p "$FATM"
+  if hdiutil create -quiet -size 64m -fs MS-DOS -volname UWTFAT "$ROOT/fat.dmg" \
+     && hdiutil attach -quiet -nobrowse -mountpoint "$FATM" "$ROOT/fat.dmg"; then
+    FP="$FATM/proj"
+    ( mkdir -p "$FP/ProjectSettings" "$FP/Assets" "$FP/Library" && cd "$FP" \
+      && git init -q -b main && git config user.email t@t && git config user.name t \
+      && printf 'm_EditorVersion: 6000.7.0b1\n' > ProjectSettings/ProjectVersion.txt \
+      && echo a > Assets/a.txt && printf '/Library/\n' > .gitignore \
+      && git add -A && git commit -qm init && head -c 300000 /dev/urandom > Library/ArtifactDB ) \
+      || fail "FAT fixture setup"
+    out="$(uwt doctor "$FP" 2>&1)"; rc=$?
+    check "doctor on FAT exits 2"                       [ $rc = 2 ]
+    check "and says the volume is not APFS"             grep -q 'not APFS' <<<"$out"
+    uwt seed "$FP" >/dev/null 2>&1; rc=$?
+    check "seed on FAT exits 2"                         [ $rc = 2 ]
+    check "and publishes no golden"                     absent "$FP/.git/uwt/golden" "$FP/.git/uwt/golden.txt"
+    cd "$ROOT"; hdiutil detach -quiet -force "$FATM" >/dev/null 2>&1
+  else
+    skip "could not create or mount a FAT image"
+  fi
+else
+  skip "FAT refusal (macOS only)"
 fi
 
 # ------------------------------------------------------------------ done

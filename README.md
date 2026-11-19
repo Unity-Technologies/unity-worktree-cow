@@ -29,7 +29,9 @@ parallel. All are measured by physical-cluster overlap (`uwt measure`).
 A hydrated worktree opens without a reimport (0–6 assets imported, against
 4,035–23,451 cold) but not without a compile: the first open rebuilds every
 script assembly and resolves packages, about 400 s on the production project
-with four editors opening at once, most of it contention between them.
+with four editors opening at once, most of it contention between them, and
+about a minute for one editor alone on the test projects. Seed from a clean
+checkout: uncommitted edits in the donor reimport in every worktree.
 Its cost is about one 4 KiB cluster per file, so it is close
 to fixed per project and the saving grows with project size. After the first
 open it grows slowly, except that on Unity 6.6+ a texture or model reimport
@@ -71,7 +73,8 @@ uwt=<skill folder>/scripts/unity-worktree-cow.sh
 $uwt doctor                  # proves this volume block-clones; run first
 $uwt seed                    # snapshot project + Library into .git/uwt/golden
 $uwt new feature/x           # git worktree add + clone + hydrate, ~seconds
-$uwt hydrate path/to/wt      # give a worktree someone else created a Library
+$uwt hydrate path/to/wt      # give a worktree someone else created a Library;
+                             # safe to re-run, --json for setup scripts
 $uwt list --json             # every worktree, and where its Library came from
 $uwt remove path/to/wt       # git worktree remove, refused while an editor has it open
                              # (--delete-branch: also the branch, if it holds no work)
