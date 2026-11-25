@@ -21,10 +21,10 @@ Synthetic fixtures: a fake git repo shaped like a Unity project with a fake
 | group | covers |
 |---|---|
 | 1 | `doctor` resolves the project from a subdirectory and reports state |
-| 2 | `seed` snapshots the tracked tree and `Library`, applies the deny list and the never-list, leaves the source alone, honours `--force`, rejects an empty `ArtifactDB` |
+| 2 | `seed` snapshots the tracked tree and `Library`, applies the deny list and the never-list, leaves the source alone, honours `--force`, rejects an empty `ArtifactDB`, keeps a dangling top-level symlink (Linux and macOS) |
 | 3 | the interlock refuses while a database is held open by another process (Linux and macOS) and while it is memory-mapped with the fd already closed, the way LMDB holds it (Linux; python3 builds the mapping); `doctor` names the open-file mechanism; a dead pid does not block. Windows needs a real editor, see below |
 | 4 | `new` registers, clones, reconciles to the target branch (same-commit and cross-branch), cleans inherited untracked files, honours `--path`, `--base`, `--inherit-untracked`, checks out an existing branch, gives committed content for files the source hides behind `assume-unchanged`/`skip-worktree`, and refuses before registering when it cannot proceed |
-| 5 | `hydrate` fills a plain worktree, refuses to overwrite without `--force`, warns on a Unity version mismatch |
+| 5 | `hydrate` fills a plain worktree, refuses to overwrite without `--force`, warns on a Unity version mismatch; `--force` refuses (exit 3) when the project is opened while the replacement is being cloned (Linux and macOS) |
 | 6 | CLI errors exit 2 |
 | 7 | a project in a subdirectory of its repo: `seed` records the prefix, `new` clones back to it and leaves files outside it to git, `hydrate` given the worktree root finds the project |
 | 8 | `list` (text and `--json`) and where each `Library` came from; `remove` refuses the main worktree, a non-root path, a dirty worktree without `--force`, and a worktree whose `ArtifactDB` is open (exit 3), and keeps the branch, or with `--delete-branch` deletes it only when it has no commits of its own; `new --json` success and error records; `new --verify` rolls back a snapshot whose content changed behind matching stat data (which plain `new` lets through on Windows), runs its fresh-index pass only on Windows, and a configured `core.checkStat=minimal` does not weaken the check |

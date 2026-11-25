@@ -61,7 +61,7 @@ mkdir -p "$PROJ" && cd "$PROJ" || exit 2
 # The branch is named, never left to init.defaultBranch: the groups below return to it by name.
 git init -q -b main && git config user.email t@t && git config user.name t && git config core.autocrlf false \
   || { echo "fixture: git init failed"; exit 2; }
-mkdir -p ProjectSettings Assets/Scenes Packages Library/PackageCache/com.x@abc Library/DataStore/00 \
+mkdir -p ProjectSettings Assets/Scenes Packages Library/PackageCache/com.x@abc Library/PackageManager/Cache Library/DataStore/00 \
          Library/Bee Library/BurstCache Library/ScriptAssemblies Library/Search Library/Pipeline Library/ShaderCache Temp obj
 printf 'm_EditorVersion: 6000.7.0b1\nm_EditorVersionWithRevision: 6000.7.0b1 (deadbeef)\n' > ProjectSettings/ProjectVersion.txt
 echo scene > Assets/Scenes/A.unity; echo '{}' > Packages/manifest.json; echo tracked > README.md
@@ -71,6 +71,7 @@ head -c 200000 /dev/urandom > Library/SourceAssetDB
 head -c 100000 /dev/urandom > Library/DataStore/uds.db
 head -c 100000 /dev/urandom > Library/DataStore/UDSData_3.bin
 echo pkg > Library/PackageCache/com.x@abc/package.json
+echo '{"packages":{"com.x":{"fingerprint":"abc"}}}' > Library/PackageManager/install.db; echo sig > Library/PackageManager/Cache/sig
 echo dag > Library/Bee/x.dag; echo burst > Library/BurstCache/b.dll; echo dll > Library/ScriptAssemblies/a.dll
 echo idx > Library/Search/i.index; echo pipe > Library/Pipeline/p; echo sc > Library/ShaderCache/s.bin
 # The smallest EditorUserBuildSettings.asset uwt reads the build target from:
@@ -119,6 +120,8 @@ if [ $CLONES = 1 ]; then
   check "cloned: ArtifactDB, SourceAssetDB, DataStore, PackageCache, ShaderCache" \
         nonempty "$GD/Library/ArtifactDB" "$GD/Library/SourceAssetDB" "$GD/Library/DataStore/uds.db" \
                  "$GD/Library/PackageCache/com.x@abc/package.json" "$GD/Library/ShaderCache/s.bin"
+  check "cloned: PackageManager, whose install.db keeps PackageCache shared" \
+        nonempty "$GD/Library/PackageManager/install.db" "$GD/Library/PackageManager/Cache/sig"
   check "denied: Bee, BurstCache, ScriptAssemblies, Search" \
         absent "$GD/Library/Bee" "$GD/Library/BurstCache" "$GD/Library/ScriptAssemblies" "$GD/Library/Search"
   check "never-files stripped: EditorInstance.json, *-lock, *.pid, Pipeline/" \
@@ -128,6 +131,15 @@ if [ $CLONES = 1 ]; then
   check "seed --force republishes"                       bash -c "touch -d '2000-01-01' '$GD.txt'; bash '$UWT' seed '$PROJ' --force >/dev/null && [ \"\$(find '$GD.txt' -newermt '2001-01-01')\" ]"
   check "seed refuses an empty ArtifactDB"               bash -c "cp -r '$PROJ' '$ROOT/proj-empty' && : > '$ROOT/proj-empty/Library/ArtifactDB'; bash '$UWT' seed '$ROOT/proj-empty' --force; [ \$? = 2 ]"
   rm -rf "$ROOT/proj-empty"
+  if [ $WIN = 0 ]; then
+    # The tree clone walks top-level entries; one that is a dangling symlink
+    # still has to be cloned. Re-seeded without it so later groups see the
+    # fixture they expect.
+    ln -s nowhere "$PROJ/dangling"
+    check "a dangling top-level symlink is in the snapshot" bash -c "bash '$UWT' seed '$PROJ' --force >/dev/null 2>&1 && [ -L '$GD/dangling' ]"
+    rm -f "$PROJ/dangling"
+    uwt seed "$PROJ" --force >/dev/null 2>&1 || { echo "fixture: re-seed failed"; exit 2; }
+  fi
 else
   check "seed refuses on a non-cloning volume with exit 2" [ $rc = 2 ]
   check "seed says why"                                    grep -qi 'cannot block-clone' <<<"$out"
@@ -173,6 +185,7 @@ if [ $CLONES = 1 ]; then
   check "inherited untracked file was cleaned"          [ ! -e "$WT/scratch.txt" ]
   check "Library hydrated with a stamp"                 nonempty "$WT/Library/ArtifactDB" "$WT/Library/.uwt-hydration.txt"
   check "Library has no denied or never entries"        absent "$WT/Library/Bee" "$WT/Library/EditorInstance.json"
+  check "Library carries the package install record"    nonempty "$WT/Library/PackageManager/install.db" "$WT/Library/PackageManager/Cache/sig"
   check "Library is writable"                           bash -c "echo x >> '$WT/Library/ArtifactDB'"
   check "new refuses an existing path"                  bash -c "bash '$UWT' new feature/y --path '$WT' >/dev/null 2>&1; [ \$? = 2 ]"
   check "existing branch is checked out, not recreated" bash -c "bash '$UWT' new keep --path '$ROOT/wt-keep' >/dev/null 2>&1 && [ \"\$(git -C '$ROOT/wt-keep' branch --show-current)\" = keep ]"
@@ -268,6 +281,21 @@ if [ $CLONES = 1 ]; then
     check "and leaves the existing Library byte-identical" bash -c "cmp -s '$ROOT/plain/Library/ArtifactDB' '$ROOT/plain-adb' && [ -f '$ROOT/plain/Library/MINE' ]"
     check "and leaves no staging directory"              absent "$ROOT/plain/Library.uwt-new" "$ROOT/plain/Library.uwt-old"
   done
+  # An editor that opens the project while the replacement is being cloned is
+  # caught before the swap. Forced the same way: the real cp, then an fd held
+  # open on the existing ArtifactDB. Not on Windows, for the reason group 3 gives.
+  if [ $WIN = 0 ]; then
+    mkdir -p "$SH/editor"
+    printf '#!/usr/bin/env bash\ncase "$*" in *.uwt-probe*) exec "%s" "$@" ;; esac\n"%s" "$@" || exit 1\n[ -e "%s" ] && exit 0\nexec 9<>"%s"\nsleep 8 >/dev/null 2>&1 & echo $! > "%s"\n' \
+      "$(command -v cp)" "$(command -v cp)" "$SH/editor/pid" "$ROOT/plain/Library/ArtifactDB" "$SH/editor/pid" > "$SH/editor/cp"
+    chmod +x "$SH/editor/cp"
+    PATH="$SH/editor:$PATH" uwt hydrate "$ROOT/plain" --force >/dev/null 2>&1; rc=$?
+    holder="$(cat "$SH/editor/pid" 2>/dev/null)"
+    if [ -n "$holder" ]; then kill "$holder" 2>/dev/null; while kill -0 "$holder" 2>/dev/null; do sleep 0.1; done; fi
+    check "hydrate --force refuses (exit 3) when an editor opens the project during the clone" [ $rc = 3 ]
+    check "and leaves the existing Library byte-identical" bash -c "cmp -s '$ROOT/plain/Library/ArtifactDB' '$ROOT/plain-adb' && [ -f '$ROOT/plain/Library/MINE' ]"
+    check "and leaves no staging directory"              absent "$ROOT/plain/Library.uwt-new" "$ROOT/plain/Library.uwt-old"
+  fi
   out="$(PATH="$SH/probe:$PATH" uwt hydrate "$ROOT/plain" --force --json 2>/dev/null)"
   check "a volume that cannot clone is reason unsupported_volume" json_is "d['status']=='error' and d['exit']==2 and d['reason']=='unsupported_volume'" <<<"$out"
   mv "$ROOT/plain/Library" "$ROOT/plain/Library.uwt-old" && mkdir "$ROOT/plain/Library.uwt-new"

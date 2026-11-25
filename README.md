@@ -12,36 +12,49 @@ private `Library/`; only the disk blocks are shared, and they diverge on write.
 Unity Version Control (Plastic) workspaces work the same way, with `cm` doing
 the reconciling; see `SKILL.md`.
 
-Measured per worktree on Windows 11, ReFS:
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/worktree-cost-dark.svg">
+  <img src="docs/worktree-cost-light.svg" width="840" alt="Disk and time for one more worktree, against project size. A plain worktree costs the whole project: 1.1 to 33.7 GiB and 61 to 668 s. A uwt worktree costs 0.45 to 1.98 GiB and 45 to 132 s.">
+</picture>
 
-| project | plain checkout + its own Library | `uwt new` | after first open + work |
-|---|---|---|---|
-| asset-heavy, 41k files | 33.7 GiB · 94 s + 573 s import | 344 MiB · 29 s | 1.98 GiB · **17×** |
-| monorepo subdir, 39k files | 16.3 GiB · 46 s + 370 s | 318 MiB · 28 s | 1.31 GiB · **12×** |
-| URP sample, 3k files | 3.4 GiB · 4 s + 121 s | 124 MiB · 11 s | 462 MiB · **7.6×** |
-| DOTS, code only | 1.1 GiB · 0.2 s + 61 s | 100 MiB · 9 s | 583 MiB · **2.0×** |
-| production, 41.5k files, 25 GiB Library | ~31 GiB (estimated) | 405 MiB · 34–40 s | 2.50–2.64 GiB · **~12×** |
+Four projects on Windows 11 (ReFS) with Unity 6.7: a code-only DOTS project
+(1.1 GiB), the URP sample (3.4 GiB), a project in a monorepo subdirectory
+(16 GiB) and an asset-heavy one (34 GiB, 41k tracked files). Project size is a
+plain checkout plus its own imported `Library/`. The uwt line is `uwt new`, a
+first open, then 50 scripted code edits and up to 50 material edits, measured
+by physical-cluster overlap (`uwt measure`). `SKILL.md` has the table.
 
-The first four are Unity 6000.7 after a first open and 100 scripted edits; the
-fifth is Unity 6000.6 after four agent-driven editors compiled and ran tests in
-parallel. All are measured by physical-cluster overlap (`uwt measure`).
+The cost follows the project's file count and code, not its size:
+
+- A fresh worktree is about one 4 KiB cluster per file: 100–344 MiB here, in
+  9–29 s.
+- The first open adds what Unity regenerates per checkout (`PackageCache`
+  binaries, `Bee`, `BurstCache`): 0.3–1.6 GiB.
+- Assets and their import results stay shared, so the saving grows with the
+  project: 2.0×, 7.6×, 12× and 17× here.
+
+Elsewhere: a production project (41.5k files, 25 GiB `Library/`, Unity 6.6)
+with four agent-driven editors compiling and running tests in parallel came to
+2.50–2.64 GiB per worktree, against an estimated 31 GiB. On macOS
+(APFS) the 34 GiB project is 0 MiB
+fresh and 1.45 GiB after a first open and 100 edits (23×); `new` takes about
+80 s there, because git re-hashes LFS content once per clone.
 
 A hydrated worktree opens without a reimport (0–6 assets imported, against
 4,035–23,451 cold) but not without a compile: the first open rebuilds every
-script assembly and resolves packages, about 400 s on the production project
-with four editors opening at once, most of it contention between them, and
-about a minute for one editor alone on the test projects. Seed from a clean
-checkout: uncommitted edits in the donor reimport in every worktree.
-Its cost is about one 4 KiB cluster per file, so it is close
-to fixed per project and the saving grows with project size. After the first
-open it grows slowly, except that on Unity 6.6+ a texture or model reimport
-can turn a whole `DataStore` segment private (0.1–0.5 GiB); see `SKILL.md`.
+script assembly and resolves packages. That took 36–104 s for one editor alone
+on the four projects above, and about 400 s on the production project with
+four editors opening at once, most of it contention between them. Seed from a
+clean checkout: uncommitted edits in the donor reimport in every worktree.
+After the first open a worktree grows slowly, except that on Unity 6.6+ a
+texture or model reimport can turn a whole `DataStore` segment private
+(0.1–0.5 GiB); see `SKILL.md`.
 
 ## Install
 
-Copy `skills/unity-worktree-cow/` into the Unity project's repo, in the folder
-your agent reads skills from, and commit it: `uwt new` resets every worktree to
-its branch, so an uncommitted skill does not reach the worktrees it creates.
+`npx skills add Unity-Technologies/unity-worktree-cow` (the `skills` CLI)
+installs it for most agents. By hand, copy `skills/unity-worktree-cow/` into
+the Unity project's repo, in the folder your agent reads skills from:
 
 | agent | folder in the repo |
 |---|---|
@@ -49,13 +62,14 @@ its branch, so an uncommitted skill does not reach the worktrees it creates.
 | Claude Code | `.claude/skills/` |
 | Copilot in VS Code | `.github/skills/` |
 
+Commit it either way: `uwt new` resets every worktree to its branch, so an
+uncommitted skill does not reach the worktrees it creates.
+
 Cursor and the Copilot coding agent also read `.claude/skills/`, so a repo
 used only with those and Claude Code needs just that one. A repo shared with
 Codex or Gemini as well needs both folders; keep the full skill in one and, in
 the other, a `SKILL.md` that repeats the frontmatter and points at the first, so
 there is only one script to update.
-
-`npx skills add Unity-Technologies/unity-worktree-cow` (the `skills` CLI) does the copy for most agents.
 
 An agent without skill support can be pointed at it from `AGENTS.md`:
 
@@ -94,22 +108,22 @@ an editor is using the project.
 A filesystem that block-clones, with the repo and the worktrees on the same
 volume:
 
-- **Windows** — ReFS (Dev Drive) on Windows 11 24H2 or later. NTFS cannot.
-- **macOS** — APFS. Suite green; measured end to end on the 41k-file project: a fresh worktree is 0 MiB private, 1.45 GiB after a first open
-  and 100 edits, against 33.8 GiB for a plain checkout plus cold import
-  (23×). `new` takes 80 s there, 69 s of it the verify `git status`
-  re-hashing 23.5 GB of LFS content once, because every clone has a new
-  inode. Windows skips that; see `SKILL.md` Troubleshooting.
-- **Linux** — btrfs, XFS with `reflink=1`, or ZFS ≥ 2.2 (where `measure`
-  refuses: ZFS does not report physical extents). ext4 cannot.
+- **Windows**: ReFS (Dev Drive) on Windows 11 24H2 or later. NTFS cannot.
+- **macOS**: APFS.
+- **Linux**: btrfs, XFS with `reflink=1`, or ZFS ≥ 2.2. ext4 cannot.
 
 On anything else `doctor` says so and the tool refuses. There is no copy
 fallback: a byte copy of the project is the problem this exists to avoid.
 
-Dependencies are bash, git and coreutils. Windows adds robocopy and fsutil,
-both in-box. Plastic workspaces need `cm` on `PATH`. `measure` alone also needs PowerShell on Windows (in-box) or
-`python3` elsewhere, because reading physical extents needs ioctls. The editor interlock needs nothing extra: a rename probe on
-Windows, a `/proc` scan on Linux, `lsof` on macOS.
+Tested with Unity 6.0, 6.3, 6.6, 6.7 (beta) and 7.0 (alpha), on Windows 11
+(ReFS), macOS (APFS) and Linux (btrfs, XFS).
+
+Dependencies are bash, git and coreutils, plus:
+
+- Windows: robocopy and fsutil, both in-box.
+- Plastic workspaces: `cm` on `PATH`.
+- `measure` only: PowerShell on Windows (in-box) or `python3` elsewhere, to
+  read physical extents. It refuses on ZFS, which does not report them.
 
 ## Documentation
 

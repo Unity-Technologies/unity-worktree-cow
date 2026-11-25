@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 310" width="840" height="310" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title id="t">Cost of one more Unity worktree, plain against uwt, by project size</title>
+<desc id="d">Two line charts against project size from 1.1 to 33.7 GiB. Disk per extra worktree: 1.1, 3.4, 16.3, 33.7 GiB plain against 0.57, 0.45, 1.31, 1.98 GiB with uwt. Time to a usable worktree: 61, 126, 415, 668 s plain against 45, 54, 81, 132 s with uwt.</desc>
+<text x="46" y="20" font-size="13" font-weight="600" fill="#f0efec">Disk per extra worktree<tspan font-weight="400" fill="#9a988f">  GiB</tspan></text>
+<line x1="46" x2="400" y1="232.0" y2="232.0" stroke="#4a4a46" stroke-width="1"/>
+<text x="38" y="236.0" font-size="11" text-anchor="end" fill="#9a988f">0</text>
+<line x1="46" x2="400" y1="180.3" y2="180.3" stroke="#2c2c2a" stroke-width="1"/>
+<text x="38" y="184.3" font-size="11" text-anchor="end" fill="#9a988f">10</text>
+<line x1="46" x2="400" y1="128.7" y2="128.7" stroke="#2c2c2a" stroke-width="1"/>
+<text x="38" y="132.7" font-size="11" text-anchor="end" fill="#9a988f">20</text>
+<line x1="46" x2="400" y1="77.0" y2="77.0" stroke="#2c2c2a" stroke-width="1"/>
+<text x="38" y="81.0" font-size="11" text-anchor="end" fill="#9a988f">30</text>
+<text x="46.0" y="249" font-size="11" text-anchor="middle" fill="#9a988f">0</text>
+<text x="144.3" y="249" font-size="11" text-anchor="middle" fill="#9a988f">10</text>
+<text x="242.7" y="249" font-size="11" text-anchor="middle" fill="#9a988f">20</text>
+<text x="341.0" y="249" font-size="11" text-anchor="middle" fill="#9a988f">30</text>
+<text x="223.0" y="267" font-size="11" text-anchor="middle" fill="#9a988f">project size, GiB</text>
+<polyline points="57.0,226.2 79.6,214.4 206.8,147.5 377.4,57.9" fill="none" stroke="#898781" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="57.0" cy="226.2" r="4" fill="#898781" stroke="#0d1117" stroke-width="2"/>
+<circle cx="79.6" cy="214.4" r="4" fill="#898781" stroke="#0d1117" stroke-width="2"/>
+<circle cx="206.8" cy="147.5" r="4" fill="#898781" stroke="#0d1117" stroke-width="2"/>
+<circle cx="377.4" cy="57.9" r="4" fill="#898781" stroke="#0d1117" stroke-width="2"/>
+<polyline points="57.0,229.1 79.6,229.7 206.8,225.2 377.4,221.8" fill="none" stroke="#3987e5" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="57.0" cy="229.1" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="79.6" cy="229.7" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="206.8" cy="225.2" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="377.4" cy="221.8" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<text x="381.4" y="47.9" font-size="12" text-anchor="end" fill="#f0efec">33.7 GiB</text>
+<text x="381.4" y="211.8" font-size="12" text-anchor="end" fill="#f0efec">1.98 GiB, 17× less</text>
+<text x="206.8" y="215.2" font-size="12" text-anchor="middle" fill="#c3c2b7">12× less</text>
+<text x="466" y="20" font-size="13" font-weight="600" fill="#f0efec">Time to a usable worktree<tspan font-weight="400" fill="#9a988f">  seconds</tspan></text>
+<line x1="466" x2="820" y1="232.0" y2="232.0" stroke="#4a4a46" stroke-width="1"/>
+<text x="458" y="236.0" font-size="11" text-anchor="end" fill="#9a988f">0</text>
+<line x1="466" x2="820" y1="167.4" y2="167.4" stroke="#2c2c2a" stroke-width="1"/>
+<text x="458" y="171.4" font-size="11" text-anchor="end" fill="#9a988f">250</text>
+<line x1="466" x2="820" y1="102.8" y2="102.8" stroke="#2c2c2a" stroke-width="1"/>
+<text x="458" y="106.8" font-size="11" text-anchor="end" fill="#9a988f">500</text>
+<text x="466.0" y="249" font-size="11" text-anchor="middle" fill="#9a988f">0</text>
+<text x="564.3" y="249" font-size="11" text-anchor="middle" fill="#9a988f">10</text>
+<text x="662.7" y="249" font-size="11" text-anchor="middle" fill="#9a988f">20</text>
+<text x="761.0" y="249" font-size="11" text-anchor="middle" fill="#9a988f">30</text>
+<text x="643.0" y="267" font-size="11" text-anchor="middle" fill="#9a988f">project size, GiB</text>
+<polyline points="477.0,216.3 499.6,199.6 626.8,124.7 797.4,59.5" fill="none" stroke="#898781" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="477.0" cy="216.3" r="4" fill="#898781" stroke="#0d1117" stroke-width="2"/>
+<circle cx="499.6" cy="199.6" r="4" fill="#898781" stroke="#0d1117" stroke-width="2"/>
+<circle cx="626.8" cy="124.7" r="4" fill="#898781" stroke="#0d1117" stroke-width="2"/>
+<circle cx="797.4" cy="59.5" r="4" fill="#898781" stroke="#0d1117" stroke-width="2"/>
+<polyline points="477.0,220.4 499.6,218.1 626.8,211.0 797.4,197.9" fill="none" stroke="#3987e5" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="477.0" cy="220.4" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="499.6" cy="218.1" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="626.8" cy="211.0" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="797.4" cy="197.9" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<text x="801.4" y="49.5" font-size="12" text-anchor="end" fill="#f0efec">668 s</text>
+<text x="801.4" y="187.9" font-size="12" text-anchor="end" fill="#f0efec">132 s, 5× faster</text>
+<line x1="46" x2="64" y1="294" y2="294" stroke="#898781" stroke-width="2" stroke-linecap="round"/>
+<circle cx="55" cy="294" r="4" fill="#898781" stroke="#0d1117" stroke-width="2"/>
+<text x="72" y="298" font-size="12" fill="#c3c2b7">plain worktree with its own Library</text>
+<line x1="296" x2="314" y1="294" y2="294" stroke="#3987e5" stroke-width="2" stroke-linecap="round"/>
+<circle cx="305" cy="294" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<text x="322" y="298" font-size="12" fill="#c3c2b7">uwt worktree</text>
+</svg>

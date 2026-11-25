@@ -25,8 +25,8 @@ Measured per worktree on Windows 11, ReFS:
 | DOTS, code only | 1.1 GiB · 0.2 s + 61 s | 100 MiB · 9 s | 583 MiB · **2.0×** |
 | production, 41.5k files, 25 GiB Library | ~31 GiB (estimated) | 405 MiB · 34–40 s | 2.50–2.64 GiB · **~12×** |
 
-The first four are Unity 6000.7, "work" being a first open plus 100 scripted
-code and material edits. The fifth is Unity 6000.6 with four agent-driven
+The first four are Unity 6000.7, "work" being a first open, 50 scripted code
+edits and 50 material edits (3 on the DOTS project, all it has). The fifth is Unity 6000.6 with four agent-driven
 editors compiling and running tests in parallel. All are measured by
 physical-cluster overlap (`uwt measure`). Four editors compiling and running
 tests at once on the first four projects ended within 2% of the scripted figures or below them
@@ -53,12 +53,16 @@ checkout near the branches you will work on. `Search` is denied too, so the
 editor rebuilds its index in the background after the refresh; that is
 separate from the first-open times above.
 
-The first open is also where the private cost comes from. The largest item is
-usually `PackageCache`: Unity re-creates a fixed set of large package binaries
-(executables in `~` folders such as `com.unity.ai.assistant/RelayApp~/relay_win.exe`)
-byte-identical but in fresh blocks, 0.8–1.0 GiB on projects that carry them
-and nothing on projects that do not. Then `Bee` and `BurstCache` regenerating
-(~0.3 and 0.2–0.4 GiB). After that, code, material, shader, prefab and scene
+The first open is also where the private cost comes from: `Bee` and
+`BurstCache` regenerating (~0.3 and 0.2–0.4 GiB). Up to 6000.7.0b3 the largest
+item was usually `PackageCache`: Unity re-created a fixed set of large package
+binaries (executables in `~` folders such as
+`com.unity.ai.assistant/RelayApp~/relay_win.exe`) byte-identical but in fresh
+blocks, 0.3–1.0 GiB on projects that carry them. On 6000.7.0b10, with
+`Library/PackageManager` cloned, it re-creates none: the monorepo project's
+`PackageCache` stayed at 139 MiB through the first open, which cost 416 MiB
+against 729 on b3, and the worktree ended the same work at 1.02 GiB (16×).
+After that, code, material, shader, prefab and scene
 edits grow a worktree slowly
 (+17 to +77 MiB over a second open and 250 edits).
 
@@ -172,6 +176,9 @@ A filesystem that block-clones, with golden and worktrees on **one volume**:
   large LFS project it takes about a minute (see Troubleshooting).
 - **Linux**: btrfs, XFS with `reflink=1`, ZFS ≥ 2.2 (`measure` excepted). ext4
   cannot.
+
+Tested with Unity 6.0, 6.3, 6.6, 6.7 (beta) and 7.0 (alpha), on Windows 11
+(ReFS), macOS (APFS) and Linux (btrfs, XFS).
 
 There is no copy fallback. On a volume that cannot clone, `doctor` says so and
 every command refuses, because a byte copy of the project is the problem this
@@ -320,14 +327,15 @@ by the first build.
 
 - **Denied**: `Bee`, `BurstCache`, `BuildCache` (build-system state keyed by
   absolute path), `ScriptAssemblies` (compiled output of *this* branch's
-  scripts), `PackageManager` (regenerated from the lock file), `Search`,
-  `TempArtifacts` (indexes derived from the artifact DB).
+  scripts), `Search`, `TempArtifacts` (indexes derived from the artifact DB).
 - **Never**: `EditorInstance.json`, `ProtocolInstance.json`, `Pipeline/`,
   `*.pid`, `*-lock`, `uds.lock`, `*.index-lock`. These identify or lock a
   running editor; they are stripped after every clone.
-- **Everything else is cloned**: `PackageCache`, `DataStore`, `ArtifactDB`,
-  `SourceAssetDB`, `ShaderCache`, the `Build*` settings, `PlayerDataCache`,
-  per-user UI state. The `Build*` files are the best value per byte: they
+- **Everything else is cloned**: `PackageCache`, `PackageManager` (its install
+  record is what stops the package manager reinstalling `PackageCache`),
+  `DataStore`, `ArtifactDB`, `SourceAssetDB`, `ShaderCache`, the `Build*`
+  settings, `PlayerDataCache`, per-user UI state. The `Build*` files are the
+  best value per byte: they
   carry the active build target, so the worktree opens on the same platform
   without a platform-switch reimport.
 

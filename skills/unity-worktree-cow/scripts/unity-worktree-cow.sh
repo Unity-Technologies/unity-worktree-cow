@@ -41,7 +41,10 @@ esac
 # output of THIS branch's scripts, and indexes derived from the artifact DB.
 # They are also all cheap to rebuild, so denying them costs almost nothing.
 # (Bee was measured directly: grafting it ships the donor's compiled output.)
-LIBRARY_DENY="Bee BurstCache BuildCache ScriptAssemblies PackageManager Search TempArtifacts"
+# PackageManager is not on it: without its install.db, UPM 9.36+ (6000.7,
+# 7000.0) reinstalls every package and PackageCache stops being shared. The
+# absolute paths it holds are checked by the editor and re-resolved on open.
+LIBRARY_DENY="Bee BurstCache BuildCache ScriptAssemblies Search TempArtifacts"
 
 # Files that identify or lock a running editor. Copying them cross-wires two
 # editors or trips LMDB's reader table. Stripped after every Library clone.
@@ -381,7 +384,9 @@ cow_tree() { # cow_tree <src> <dst> [--globs] [exclude-name...]
   fi
   mkdir -p "$dst" || return 1
   for e in "$src"/* "$src"/.[!.]*; do
-    [ -e "$e" ] || continue
+    # Skips a glob that matched nothing. -e follows links, so a dangling
+    # symlink needs -L to count as the entry it is.
+    [ -e "$e" ] || [ -L "$e" ] || continue
     local n; n="$(basename "$e")"; skip=0
     for x in "$@"; do [ "$n" = "$x" ] && skip=1; done
     # shellcheck disable=SC2254
@@ -699,6 +704,10 @@ cmd_hydrate() {
   local why; why="$(cow_probe "$wt")" || REASON=unsupported_volume die "this volume cannot block-clone ($why)"
   if [ -d "$lib" ]; then
     hydrate_library "$gd" "$wt" "$new" || die "hydrate failed; the existing Library/ is untouched"
+    # The clone takes long enough for an editor to have opened the project.
+    # Off Windows the move below succeeds under it, and the editor is left
+    # running on a Library that is then deleted.
+    ( require_editor_closed "$wt" hydrate ) || { local rc=$?; rm -rf "$new"; exit $rc; }
     mv "$lib" "$old" || { rm -rf "$new"; die "could not move the existing Library/ aside; it is untouched"; }
     mv "$new" "$lib" || { mv "$old" "$lib"; rm -rf "$new"; die "could not put the new Library/ in place; the previous one is restored"; }
     rm -rf "$old" || warn "the new Library/ is in place, but $old could not be deleted; delete it by hand"
